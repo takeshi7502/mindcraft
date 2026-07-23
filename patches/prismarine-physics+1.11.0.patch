@@ -1,0 +1,13 @@
+diff --git a/node_modules/prismarine-physics/index.js b/node_modules/prismarine-physics/index.js
+index d95ce7f..8a3c0ab 100644
+--- a/node_modules/prismarine-physics/index.js
++++ b/node_modules/prismarine-physics/index.js
+@@ -66,7 +66,7 @@ function Physics (mcData, world) {
+     playerSpeed: 0.1,
+     sprintSpeed: 0.3,
+     sneakSpeed: 0.3,
+-    stepHeight: 0.6, // how much height can the bot step on without jump
++    stepHeight: 1.0, // how much height can the bot step on without jump
+     negligeableVelocity: 0.003, // actually 0.005 for 1.8, but seems fine
+     soulsandSpeed: 0.4,
+     honeyblockSpeed: 0.4,
