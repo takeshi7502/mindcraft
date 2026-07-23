@@ -1,0 +1,8 @@
+{
+    "name": "andy",
+    "model": {
+        "api": "9router",
+        "model": "kr/claude-sonnet-4.5",
+        "url": "http://localhost:20128/v1"
+    }
+}

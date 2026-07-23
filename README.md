@@ -75,6 +75,7 @@ You can configure the agent's name, model, and prompts in their profile like `an
 | `hyperbolic` | `HYPERBOLIC_API_KEY` | [docs](https://docs.hyperbolic.xyz/docs/getting-started) |
 | `vllm` | n/a | n/a |
 | `cerebras` | `CEREBRAS_API_KEY` | [docs](https://inference-docs.cerebras.ai/introduction) |
+| `9router` | `NINEROUTER_API_KEY` | [docs](https://github.com/decolua/9router) |
 | `mercury` | `MERCURY_API_KEY` | [docs](https://www.inceptionlabs.ai/) |
 
 </details>
@@ -86,6 +87,25 @@ To install our models, install ollama and run the following terminal command:
 ```bash
 ollama pull sweaterdog/andy-4:micro-q8_0 && ollama pull embeddinggemma
 ```
+
+### Using 9Router
+
+[9Router](https://github.com/decolua/9router) exposes an OpenAI-compatible API and routes requests across its configured providers and fallback combos. Start 9Router separately, connect providers in its dashboard, and copy the API key from the dashboard into `keys.json`:
+
+```json
+"NINEROUTER_API_KEY": "your-9router-api-key"
+```
+
+Then use the included `./profiles/9router.json` profile, or configure a model directly. Prefix the 9Router model or combo ID with `9router/`:
+
+```json
+{
+  "name": "andy",
+  "model": "9router/kr/claude-sonnet-4.5"
+}
+```
+
+The default endpoint is `http://localhost:20128/v1`. To use another host or port, specify a model object with `"api": "9router"`, the 9Router model ID, and a custom `"url"`. 9Router must already be running before Mindcraft starts.
 
 ## Online Servers
 To connect to online servers your bot will need an official Microsoft/Minecraft account. You can use your own personal one, but will need another account if you want to connect too and play with it. To connect, change these lines in `settings.js`:

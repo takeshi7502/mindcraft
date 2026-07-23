@@ -1,6 +1,8 @@
 {
-    "name": "andy",
-
-    "model": "gpt-5.4-mini"
-
+    "name": "waku",
+    "model": {
+        "api": "9router",
+        "model": "oc/deepseek-v4-flash-free",
+        "url": "https://9router.hzzmonet.io.vn/v1"
+    }
 }
