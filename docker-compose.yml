@@ -3,7 +3,7 @@ services:
     build: .
     environment:
       SETTINGS_JSON: |
-        {"auto_open_ui": false}
+        {"auto_open_ui": false, "host_public": true}
     volumes:
       - ./settings.js:/app/settings.js
       - ./keys.json:/app/keys.json
