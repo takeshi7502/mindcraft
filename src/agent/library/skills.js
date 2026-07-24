@@ -321,6 +321,10 @@ export async function attackNearest(bot, mobType, kill=true) {
      * await skills.attackNearest(bot, "zombie", true);
      **/
     bot.modes.pause('cowardice');
+    if (mc.isIgnoredMob({name: mobType})) {
+        log(bot, `Refusing to attack ignored mob ${mobType}.`);
+        return false;
+    }
     if (mobType === 'drowned' || mobType === 'cod' || mobType === 'salmon' || mobType === 'tropical_fish' || mobType === 'squid')
         bot.modes.pause('self_preservation'); // so it can go underwater. TODO: have an drowning mode so we don't turn off all self_preservation
     const mob = world.getNearbyEntities(bot, 24).find(entity => entity.name === mobType);
@@ -340,6 +344,10 @@ export async function attackEntity(bot, entity, kill=true) {
      * @example
      * await skills.attackEntity(bot, entity);
      **/
+    if (mc.isIgnoredMob(entity)) {
+        log(bot, `Refusing to attack ignored mob ${entity?.name || 'unknown'}.`);
+        return false;
+    }
 
     let pos = entity.position;
     await equipHighestAttack(bot)

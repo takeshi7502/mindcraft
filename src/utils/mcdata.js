@@ -138,8 +138,14 @@ export function isHuntable(mob) {
     return animals.includes(mob.name.toLowerCase()) && !mob.metadata[16]; // metadata 16 is not baby
 }
 
-export function isHostile(mob) {
+export function isIgnoredMob(mob) {
     if (!mob || !mob.name) return false;
+    const ignoredMobs = Array.isArray(settings.ignored_mobs) ? settings.ignored_mobs : [];
+    return ignoredMobs.some(name => String(name).toLowerCase() === mob.name.toLowerCase());
+}
+
+export function isHostile(mob) {
+    if (!mob || !mob.name || isIgnoredMob(mob)) return false;
     return  (mob.type === 'mob' || mob.type === 'hostile') && mob.name !== 'iron_golem' && mob.name !== 'snow_golem';
 }
 
