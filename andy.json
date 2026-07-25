@@ -2,7 +2,7 @@
     "name": "waku",
     "model": {
         "api": "9router",
-        "model": "oc/deepseek-v4-flash-free",
-        "url": "https://9router.hzzmonet.io.vn/v1"
+        "model": "ab/deepseek-v4-flash",
+        "url": "http://localhost:20128/v1"
     }
 }

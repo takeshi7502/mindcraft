@@ -42,6 +42,8 @@
       "gl": "^8.1.6"
     },
     "scripts": {
+        "test": "node --test",
+        "lint": "eslint src/agent/chat_gate.js src/agent/task_scheduler.js src/agent/library/task_primitives.js src/agent/library/task_observation.js src/agent/library/deterministic_tasks.js src/agent/library/material_acquisition.js src/agent/library/combat_targeting.js src/agent/library/combat_observation.js src/agent/library/teleport_requests.js src/agent/library/inventory_cleanup.js src/agent/library/blueprint_catalog.js src/agent/library/blueprint_build.js",
         "postinstall": "patch-package",
         "start": "node main.js",
         "reinstall": "npm run clean:modules && npm install",

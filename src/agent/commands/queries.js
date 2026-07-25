@@ -17,6 +17,7 @@ export const queryList = [
         perform: function (agent) {
             let bot = agent.bot;
             let res = 'STATS';
+            if (!bot?.entity?.position) return pad('STATS\n- Bot is not currently spawned in the world.');
             let pos = bot.entity.position;
             // display position to 2 decimal places
             res += `\n- Position: x: ${pos.x.toFixed(2)}, y: ${pos.y.toFixed(2)}, z: ${pos.z.toFixed(2)}`;

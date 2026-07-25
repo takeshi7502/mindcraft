@@ -1,6 +1,32 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import * as skills from '../library/skills.js';
 import settings from '../settings.js';
 import convoManager from '../conversation.js';
+import { approachNearbyBlock, fishNearby, formatTaskResult } from '../library/deterministic_tasks.js';
+import {
+    buildNamedBlueprint,
+    formatBlueprintProgress,
+    validateNamedBlueprintReconnect,
+} from '../library/blueprint_build.js';
+import { listBlueprintNames } from '../library/blueprint_catalog.js';
+import { acquireMaterials } from '../library/material_acquisition.js';
+import { FailureReason, taskResult } from '../library/task_primitives.js';
+import { acceptTpa, requestTpaToPlayer } from '../library/teleport_requests.js';
+import { cleanupInventory } from '../library/inventory_cleanup.js';
+
+const commandContext = new AsyncLocalStorage();
+
+export function runWithCommandSource(agent, source, operation) {
+    const normalizedSource = typeof source === 'string' && source.trim()
+        ? source.trim()
+        : 'system';
+    return commandContext.run({ agent, source: normalizedSource }, operation);
+}
+
+function getCommandSource(agent) {
+    const context = commandContext.getStore();
+    return context?.agent === agent ? context.source : 'system';
+}
 
 
 function runAsAction (actionFn, resume = false, timeout = -1) {
@@ -23,6 +49,82 @@ function runAsAction (actionFn, resume = false, timeout = -1) {
     }
 
     return wrappedAction;
+}
+
+function runDeterministicTask(actionLabel, taskFn, timeout = 2) {
+    return async function(agent, ...args) {
+        let result;
+        const action = await agent.actions.runAction(`action:${actionLabel}`, async () => {
+            result = await taskFn(agent, ...args);
+            skills.log(agent.bot, formatTaskResult(result));
+        }, { timeout });
+        if (result) return formatTaskResult(result);
+        if (action.interrupted && !action.timedout) return;
+        return action.message;
+    };
+}
+
+function taskOwner(agent) {
+    return getCommandSource(agent);
+}
+
+function runEmergencyTask(actionLabel, actionFn, timeout = 2) {
+    return async function(agent, ...args) {
+        if (!agent.taskScheduler)
+            return runAsAction(actionFn, false, timeout)(agent, ...args);
+        const outcome = await agent.taskScheduler.runEmergencyTask({
+            name: `emergency:${actionLabel}`,
+            owner: taskOwner(agent),
+            target: { arguments: args },
+            terminalConditions: ['command_completed'],
+        }, async () => {
+            await actionFn(agent, ...args);
+            return taskResult(true, { message: `${actionLabel} completed.` });
+        }, { timeout });
+        return formatTaskResult(outcome.status);
+    };
+}
+
+function runOwnerLockedTask(actionLabel, actionFn, timeout = 10) {
+    return async function(agent, ...args) {
+        const outcome = await agent.taskScheduler.startLongTask({
+            name: `${actionLabel}:${args.join(':')}`,
+            owner: taskOwner(agent),
+            target: { command: actionLabel, arguments: args },
+            terminalConditions: ['command_completed', 'bot_died'],
+            checkpoint: { arguments: args },
+        }, async (control, record) => {
+            const result = await actionFn(agent, ...args);
+            const stopped = control.check();
+            if (stopped) {
+                return taskResult(false, {
+                    reason: stopped,
+                    message: `${actionLabel} was interrupted.`,
+                    complete: false,
+                    checkpoint: record.checkpoint,
+                    progress: record.progress,
+                });
+            }
+            if (result?.success !== undefined) {
+                return {
+                    ...result,
+                    checkpoint: result.data?.checkpoint ?? record.checkpoint,
+                    progress: result.data?.progress ?? record.progress,
+                };
+            }
+            if (result === false) {
+                return taskResult(false, {
+                    message: `${actionLabel} did not complete.`,
+                    checkpoint: record.checkpoint,
+                });
+            }
+            return taskResult(true, {
+                message: `${actionLabel} completed.`,
+                checkpoint: record.checkpoint,
+            });
+        }, { timeout });
+        return formatTaskResult(outcome.status);
+    };
 }
 
 export const actionsList = [
@@ -54,6 +156,7 @@ export const actionsList = [
         name: '!stop',
         description: 'Force stop all actions and commands that are currently executing.',
         perform: async function (agent) {
+            await agent.taskScheduler?.emergencyStop('emergency_stop');
             await agent.actions.stop();
             agent.clearBotLogs();
             agent.actions.cancelResume();
@@ -62,6 +165,200 @@ export const actionsList = [
             if (agent.self_prompter.isActive())
                 msg += ' Self-prompting still active.';
             return msg;
+        }
+    },
+    {
+        name: '!goToNearbyBlockSafely',
+        description: 'Find a nearby block and move to a safe adjacent position without digging or placing.',
+        params: {
+            'type': { type: 'BlockName', description: 'The block type to approach.' },
+            'search_range': { type: 'int', description: 'Maximum bounded search range.', domain: [1, 33] },
+        },
+        perform: async function(agent, type, search_range) {
+            const outcome = await agent.taskScheduler.runShortTask({
+                name: `approach:${type}`,
+                owner: taskOwner(agent),
+                target: { block: type, searchRange: search_range },
+                terminalConditions: ['command_completed', 'bot_died'],
+            }, () => approachNearbyBlock(agent.bot, {
+                names: [type],
+                searchRadius: search_range,
+            }), { timeout: 1 });
+            return formatTaskResult(outcome.status);
+        }
+    },
+    {
+        name: '!fishNearby',
+        description: 'Safely find reachable nearby water and fish with bounded retries. Requires a fishing rod.',
+        params: {
+            'search_range': { type: 'int', description: 'Maximum nearby water search range.', domain: [4, 33] },
+            'attempts': { type: 'int', description: 'Maximum number of casts.', domain: [1, 4] },
+        },
+        perform: runOwnerLockedTask('fishNearby', async (agent, search_range, attempts) =>
+            fishNearby(agent.bot, { searchRadius: search_range, attempts }), 2)
+    },
+    {
+        name: '!buildBlueprint',
+        description: `Deterministically build a predefined blueprint. Available: ${listBlueprintNames().join(', ')}.`,
+        params: {
+            'name': { type: 'string', description: 'Blueprint catalog name.' },
+            'orientation': { type: 'int', description: 'Quarter-turn orientation: 0, 1, 2, or 3.', domain: [0, 4] },
+        },
+        perform: async function(agent, name, orientation) {
+            const outcome = await agent.taskScheduler.startLongTask({
+                name: `build:${name}`,
+                owner: taskOwner(agent),
+                target: { blueprint: name, orientation },
+                terminalConditions: ['blueprint_verified', 'bot_died'],
+                progress: { total: 0, completed: 0, remaining: 0 },
+                checkpoint: { orientation, completedKeys: [] },
+            }, async (control, record) => {
+                let buildCheckpoint = record.checkpoint.build ?? record.checkpoint;
+                let acquisitionCheckpoint = record.checkpoint.acquisition ?? {};
+                const maxAcquisitionRounds = 8;
+
+                for (let round = 0; round <= maxAcquisitionRounds; round++) {
+                    const result = await buildNamedBlueprint(agent.bot, name, {
+                        orientation,
+                        checkpoint: buildCheckpoint,
+                        onCheckpoint: (nextCheckpoint, progress) => {
+                            buildCheckpoint = nextCheckpoint;
+                            return control.checkpoint({
+                                build: buildCheckpoint,
+                                acquisition: acquisitionCheckpoint,
+                            }, { phase: 'building', ...progress });
+                        },
+                        onProgress: progress => skills.log(
+                            agent.bot,
+                            formatBlueprintProgress(progress),
+                        ),
+                    });
+                    if (result.success || result.reason !== FailureReason.MISSING_MATERIALS) {
+                        return {
+                            ...result,
+                            checkpoint: {
+                                build: result.data?.checkpoint ?? buildCheckpoint,
+                                acquisition: acquisitionCheckpoint,
+                            },
+                            progress: result.data?.progress ?? control.record.progress,
+                        };
+                    }
+
+                    buildCheckpoint = {
+                        ...buildCheckpoint,
+                        origin: result.data.origin ?? buildCheckpoint.origin,
+                        orientation: result.data.orientation ?? orientation,
+                    };
+                    const acquisition = await acquireMaterials(agent.bot, result.data.shortages, {
+                        protectedPositions: [
+                            ...(result.data.protectedPositions ?? []),
+                            ...(agent.npc?.getBuiltPositions?.() ?? []),
+                        ],
+                        checkpoint: acquisitionCheckpoint,
+                        onProgress: progress => {
+                            skills.log(agent.bot,
+                                `Materials ${progress.phase}: ${JSON.stringify(progress.remaining)}.`);
+                            control.checkpoint({
+                                build: buildCheckpoint,
+                                acquisition: acquisitionCheckpoint,
+                            }, { phase: progress.phase, ...progress });
+                        },
+                    });
+                    acquisitionCheckpoint = acquisition.checkpoint ?? acquisitionCheckpoint;
+                    control.checkpoint({
+                        build: buildCheckpoint,
+                        acquisition: acquisitionCheckpoint,
+                    }, acquisition.progress);
+                    if (!acquisition.success) {
+                        return {
+                            ...acquisition,
+                            data: {
+                                ...acquisition.data,
+                                blueprint: name,
+                                buildCheckpoint,
+                            },
+                            checkpoint: {
+                                build: buildCheckpoint,
+                                acquisition: acquisitionCheckpoint,
+                            },
+                        };
+                    }
+                }
+
+                return taskResult(false, {
+                    reason: FailureReason.MISSING_MATERIALS,
+                    message: 'Material acquisition round limit reached.',
+                    checkpoint: { build: buildCheckpoint, acquisition: acquisitionCheckpoint },
+                    progress: { phase: 'waiting_materials' },
+                    complete: false,
+                });
+            }, {
+                timeout: 20,
+                reconnectCheck: (record, { previousContext, currentContext }) => {
+                    if (agent.bot.health <= 0) {
+                        return {
+                            eligible: false,
+                            state: 'failed',
+                            reason: 'bot_not_alive',
+                            message: 'The bot is not alive after reconnect.',
+                        };
+                    }
+                    if ((previousContext.server && currentContext.server &&
+                        previousContext.server !== currentContext.server) ||
+                        (previousContext.dimension && currentContext.dimension &&
+                        previousContext.dimension !== currentContext.dimension)) {
+                        return {
+                            eligible: false,
+                            state: 'paused',
+                            reason: 'world_dimension_changed',
+                            message: 'Build paused because the bot rejoined a different server or dimension.',
+                        };
+                    }
+                    return validateNamedBlueprintReconnect(agent.bot, name, {
+                        orientation,
+                        checkpoint: record.checkpoint.build ?? record.checkpoint,
+                    });
+                },
+            });
+            return formatTaskResult(outcome.status);
+        }
+    },
+    {
+        name: '!taskStatus',
+        description: 'Show structured scheduled-task state, owner, target, progress, and lifecycle.',
+        perform: function(agent) {
+            return agent.taskScheduler.describe();
+        }
+    },
+    {
+        name: '!pauseTask',
+        description: 'Pause an owned long task at its latest checkpoint.',
+        params: { 'task_id': { type: 'string', description: 'Scheduled task id.' } },
+        perform: async function(agent, task_id) {
+            const outcome = await agent.taskScheduler.requestPause(task_id, taskOwner(agent));
+            return formatTaskResult(outcome.status);
+        }
+    },
+    {
+        name: '!resumeTask',
+        description: 'Resume an owned paused or material-waiting long task.',
+        params: { 'task_id': { type: 'string', description: 'Scheduled task id.' } },
+        perform: async function(agent, task_id) {
+            const outcome = await agent.taskScheduler.requestResume(task_id, taskOwner(agent));
+            return formatTaskResult(outcome.status);
+        }
+    },
+    {
+        name: '!cancelTask',
+        description: 'Cancel a scheduled task. Long tasks are owner-controlled.',
+        params: { 'task_id': { type: 'string', description: 'Scheduled task id.' } },
+        perform: async function(agent, task_id) {
+            const outcome = await agent.taskScheduler.requestCancellation(
+                task_id,
+                taskOwner(agent),
+                'cancelled_by_owner',
+            );
+            return formatTaskResult(outcome.status);
         }
     },
     {
@@ -74,8 +371,15 @@ export const actionsList = [
         }
     },
     {
+        name: '!rejoinWorld',
+        description: 'Safely leave and rejoin the Minecraft world in the same process, then validate and resume eligible scheduled work.',
+        perform: function (agent) {
+            return agent.rejoinWorld('explicit_rejoin_command');
+        }
+    },
+    {
         name: '!restart',
-        description: 'Restart the agent process.',
+        description: 'Restart the agent process. In-memory scheduled tasks are intentionally forgotten.',
         perform: async function (agent) {
             agent.cleanKill();
         }
@@ -95,8 +399,35 @@ export const actionsList = [
             'player_name': {type: 'string', description: 'The name of the player to go to.'},
             'closeness': {type: 'float', description: 'How close to get to the player.', domain: [0, Infinity]}
         },
-        perform: runAsAction(async (agent, player_name, closeness) => {
+        perform: runEmergencyTask('goToPlayer', async (agent, player_name, closeness) => {
+            requestTpaToPlayer(agent.bot, player_name);
             await skills.goToPlayer(agent.bot, player_name, closeness);
+        })
+    },
+    {
+        name: '!tpaToPlayer',
+        description: 'Best-effort request to teleport to a player using server TPA plugins such as SimpleTPA. Use this first when a player asks the bot to teleport to them; fall back to goToPlayer/follow if the server does not support TPA.',
+        params: {'player_name': {type: 'string', description: 'The player to request teleporting to.'}},
+        perform: async function(agent, player_name) {
+            return requestTpaToPlayer(agent.bot, player_name)
+                ? `Sent /tpa ${player_name}. If the server lacks TPA support, use movement fallback.`
+                : `Invalid player name ${player_name}.`;
+        }
+    },
+    {
+        name: '!tpAccept',
+        description: 'Accept a pending teleport request using /tpaccept.',
+        perform: async function(agent) {
+            acceptTpa(agent.bot);
+            return 'Sent /tpaccept.';
+        }
+    },
+    {
+        name: '!cleanupInventory',
+        description: 'Clean a full inventory by depositing nonessential items into a nearby chest first, then discarding safe junk/overflow if no chest is available.',
+        perform: runEmergencyTask('cleanupInventory', async (agent) => {
+            const result = await cleanupInventory(agent.bot);
+            skills.log(agent.bot, `Inventory cleanup: deposited=${result.deposited}, discarded=${result.discarded}. ${result.message ?? ''}`);
         })
     },
     {
@@ -106,9 +437,70 @@ export const actionsList = [
             'player_name': {type: 'string', description: 'name of the player to follow.'},
             'follow_dist': {type: 'float', description: 'The distance to follow from.', domain: [0, Infinity]}
         },
-        perform: runAsAction(async (agent, player_name, follow_dist) => {
-            await skills.followPlayer(agent.bot, player_name, follow_dist);
-        }, true)
+        perform: async function(agent, player_name, follow_dist) {
+            const outcome = await agent.taskScheduler.replacePersistentTask({
+                name: `follow:${player_name}`,
+                owner: taskOwner(agent),
+                target: { player: player_name, distance: follow_dist },
+                terminalConditions: ['target_died', 'bot_died', 'explicit_replacement'],
+                checkpoint: { player: player_name, distance: follow_dist },
+            }, async (control) => {
+                await skills.followPlayer(agent.bot, player_name, follow_dist);
+                const stopped = control.check();
+                if (stopped) {
+                    return taskResult(false, {
+                        reason: stopped,
+                        message: `Follow ${player_name} was interrupted.`,
+                        complete: false,
+                        checkpoint: control.record.checkpoint,
+                    });
+                }
+                return taskResult(true, {
+                    message: `Follow ${player_name} reached a terminal condition.`,
+                    terminal: true,
+                    checkpoint: control.record.checkpoint,
+                });
+            }, {
+                timeout: -1,
+                terminalCheck: () => agent.bot.health <= 0,
+                reconnectCheck: (record, { previousContext, currentContext }) => {
+                    if (agent.bot.health <= 0) {
+                        return {
+                            eligible: false,
+                            state: 'failed',
+                            reason: 'bot_not_alive',
+                            message: 'Follow cannot resume because the bot is not alive.',
+                        };
+                    }
+                    if ((previousContext.server && currentContext.server &&
+                        previousContext.server !== currentContext.server) ||
+                        (previousContext.dimension && currentContext.dimension &&
+                        previousContext.dimension !== currentContext.dimension)) {
+                        return {
+                            eligible: false,
+                            state: 'paused',
+                            reason: 'world_dimension_changed',
+                            message: 'Follow paused because the bot rejoined a different server or dimension.',
+                        };
+                    }
+                    const target = agent.bot.players[record.target.player]?.entity;
+                    if (!target || target.isValid === false) {
+                        return {
+                            eligible: false,
+                            state: 'paused',
+                            reason: 'follow_target_unavailable',
+                            message: `Follow target ${record.target.player} is not present and alive.`,
+                        };
+                    }
+                    return {
+                        eligible: true,
+                        reason: 'follow_target_verified',
+                        message: `Follow target ${record.target.player} is present.`,
+                    };
+                },
+            });
+            return formatTaskResult(outcome.status);
+        }
     },
     {
         name: '!goToCoordinates',
@@ -139,6 +531,20 @@ export const actionsList = [
         })
     },
     {
+        name: '!mineNearestBlock',
+        description: 'Find, move to, and actually break/mine the nearest block of the given type. Use this for requests like mining diamonds, ancient debris, ores, or blocks; unlike searchForBlock, this breaks the block.',
+        params: {
+            'type': { type: 'BlockName', description: 'The block type to mine.' },
+            'search_range': { type: 'float', description: 'The range to search for the block.', domain: [4, 128] }
+        },
+        perform: runOwnerLockedTask('mineNearestBlock', async (agent, block_type, range) => {
+            const mined = await skills.mineNearestBlock(agent.bot, block_type, range);
+            return taskResult(Boolean(mined), {
+                message: mined ? `Mined nearest ${block_type}.` : `Could not mine ${block_type}.`,
+            });
+        }, 5)
+    },
+    {
         name: '!searchForEntity',
         description: 'Find and go to the nearest entity of a given type in a given range.',
         params: {
@@ -153,7 +559,7 @@ export const actionsList = [
         name: '!moveAway',
         description: 'Move away from the current location in any direction by a given distance.',
         params: {'distance': { type: 'float', description: 'The distance to move away.', domain: [0, Infinity] }},
-        perform: runAsAction(async (agent, distance) => {
+        perform: runEmergencyTask('moveAway', async (agent, distance) => {
             await skills.moveAway(agent.bot, distance);
         })
     },
@@ -259,9 +665,9 @@ export const actionsList = [
             'type': { type: 'BlockName', description: 'The block type to collect.' },
             'num': { type: 'int', description: 'The number of blocks to collect.', domain: [1, Number.MAX_SAFE_INTEGER] }
         },
-        perform: runAsAction(async (agent, type, num) => {
-            await skills.collectBlock(agent.bot, type, num);
-        }, false, 10) // 10 minute timeout
+        perform: runOwnerLockedTask('collectBlocks', async (agent, type, num) => {
+            return skills.collectBlock(agent.bot, type, num);
+        }, 10)
     },
     {
         name: '!craftRecipe',
@@ -270,9 +676,9 @@ export const actionsList = [
             'recipe_name': { type: 'ItemName', description: 'The name of the output item to craft.' },
             'num': { type: 'int', description: 'The number of times to craft the recipe. This is NOT the number of output items, as it may craft many more items depending on the recipe.', domain: [1, Number.MAX_SAFE_INTEGER] }
         },
-        perform: runAsAction(async (agent, recipe_name, num) => {
-            await skills.craftRecipe(agent.bot, recipe_name, num);
-        })
+        perform: runOwnerLockedTask('craftRecipe', async (agent, recipe_name, num) => {
+            return skills.craftRecipe(agent.bot, recipe_name, num);
+        }, 5)
     },
     {
         name: '!smeltItem',
@@ -281,14 +687,15 @@ export const actionsList = [
             'item_name': { type: 'ItemName', description: 'The name of the input item to smelt.' },
             'num': { type: 'int', description: 'The number of times to smelt the item.', domain: [1, Number.MAX_SAFE_INTEGER] }
         },
-        perform: runAsAction(async (agent, item_name, num) => {
-            let success = await skills.smeltItem(agent.bot, item_name, num);
+        perform: runOwnerLockedTask('smeltItem', async (agent, item_name, num) => {
+            const success = await skills.smeltItem(agent.bot, item_name, num);
             if (success) {
                 setTimeout(() => {
                     agent.cleanKill('Safely restarting to update inventory.');
                 }, 500);
             }
-        })
+            return success;
+        }, 10)
     },
     {
         name: '!clearFurnace',

@@ -1,5 +1,5 @@
 import { getBlockId, getItemId } from "../../utils/mcdata.js";
-import { actionsList } from './actions.js';
+import { actionsList, runWithCommandSource } from './actions.js';
 import { queryList } from './queries.js';
 
 let suppressNoDomainWarning = true;
@@ -209,11 +209,12 @@ function numParams(command) {
     return commandParams(command).length;
 }
 
-export async function executeCommand(agent, message) {
-    let parsed = parseCommandMessage(message);
-    if (typeof parsed === 'string')
-        return parsed; //The command was incorrectly formatted or an invalid input was given.
-    else {
+export function executeCommand(agent, message, { source = 'system' } = {}) {
+    return runWithCommandSource(agent, source, async () => {
+        let parsed = parseCommandMessage(message);
+        if (typeof parsed === 'string')
+            return parsed; //The command was incorrectly formatted or an invalid input was given.
+
         console.log('parsed command:', parsed);
         const command = getCommand(parsed.commandName);
         let numArgs = 0;
@@ -222,11 +223,8 @@ export async function executeCommand(agent, message) {
         }
         if (numArgs !== numParams(command))
             return `Command ${command.name} was given ${numArgs} args, but requires ${numParams(command)} args.`;
-        else {
-            const result = await command.perform(agent, ...parsed.args);
-            return result;
-        }
-    }
+        return await command.perform(agent, ...parsed.args);
+    });
 }
 
 export function getCommandDocs(agent) {

@@ -40,10 +40,11 @@ const settings = {
     "language": "vi", // translate to/from this language. Supports these language names: https://cloud.google.com/translate/docs/languages
     "render_bot_view": false, // show bot's view in browser at localhost:3000, 3001...
 
-    "allow_insecure_coding": false, // allows newAction command and model can write/run code on your computer. enable at own risk
+    "allow_insecure_coding": true, // allows newAction command and model can write/run code on your computer. enable at own risk
     "allow_vision": false, // allows vision model to interpret screenshots as inputs
     "blocked_actions" : ["!checkBlueprint", "!checkBlueprintLevel", "!getBlueprint", "!getBlueprintLevel"] , // commands to disable and remove from docs. Ex: ["!setMode"]
-    "ignored_mobs": ["enderman", "zombified_piglin"], // mobs the bot will not target in automatic combat
+    "ignored_mobs": [], // additional hard deny list for automatic combat; vanilla neutral mobs are handled by built-in logic
+    "allow_player_retaliation": true, // enable/disable automatic retaliation against players
     "code_timeout_mins": -1, // minutes code is allowed to run. -1 for no timeout
     "relevant_docs_count": 5, // number of relevant code function docs to select for prompting. -1 for all
 
