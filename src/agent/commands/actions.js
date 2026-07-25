@@ -1,6 +1,7 @@
 import * as skills from '../library/skills.js';
 import settings from '../settings.js';
 import convoManager from '../conversation.js';
+import { acceptTpa, requestTpaToPlayer } from '../library/teleport_requests.js';
 
 
 function runAsAction (actionFn, resume = false, timeout = -1) {
@@ -96,8 +97,27 @@ export const actionsList = [
             'closeness': {type: 'float', description: 'How close to get to the player.', domain: [0, Infinity]}
         },
         perform: runAsAction(async (agent, player_name, closeness) => {
+            requestTpaToPlayer(agent.bot, player_name);
             await skills.goToPlayer(agent.bot, player_name, closeness);
         })
+    },
+    {
+        name: '!tpaToPlayer',
+        description: 'Best-effort request to teleport to a player using server TPA plugins such as SimpleTPA. Use this first when a player asks the bot to teleport to them; fall back to goToPlayer/follow if the server does not support TPA.',
+        params: {'player_name': {type: 'string', description: 'The player to request teleporting to.'}},
+        perform: async function(agent, player_name) {
+            return requestTpaToPlayer(agent.bot, player_name)
+                ? `Sent /tpa ${player_name}. If the server lacks TPA support, use movement fallback.`
+                : `Invalid player name ${player_name}.`;
+        }
+    },
+    {
+        name: '!tpAccept',
+        description: 'Accept a pending teleport request using /tpaccept.',
+        perform: async function(agent) {
+            acceptTpa(agent.bot);
+            return 'Sent /tpaccept.';
+        }
     },
     {
         name: '!followPlayer',

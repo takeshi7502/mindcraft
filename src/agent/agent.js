@@ -17,6 +17,12 @@ import settings from './settings.js';
 import { Task } from './tasks/tasks.js';
 import { speak } from './speak.js';
 import { log, validateNameFormat, handleDisconnection } from './connection_handler.js';
+import {
+    getDirectTpaTarget,
+    isDirectTpaRequest,
+    maybeAutoAcceptTpa,
+    requestTpaToPlayer,
+} from './library/teleport_requests.js';
 
 export class Agent {
     async start(load_mem=false, init_message=null, count_id=0) {
@@ -269,6 +275,15 @@ export class Agent {
         const self_prompt = source === 'system' || source === this.name;
         const from_other_bot = convoManager.isOtherAgent(source);
 
+        if (!self_prompt && !from_other_bot && isDirectTpaRequest(message)) {
+            const target = getDirectTpaTarget(message, source) ?? source;
+            const sent = requestTpaToPlayer(this.bot, target);
+            this.routeResponse(source, sent
+                ? `Sent /tpa ${target}.`
+                : `I couldn't send TPA to ${target}; I'll use normal movement if needed.`);
+            return sent;
+        }
+
         if (!self_prompt && !from_other_bot) { // from user, check for forced commands
             const user_command_name = containsCommand(message);
             if (user_command_name) {
@@ -473,6 +488,9 @@ export class Agent {
             }
         });
         this.bot.on('messagestr', async (message, _, jsonMsg) => {
+            if (maybeAutoAcceptTpa(this.bot, message)) {
+                log(this.name, '[TPA] Accepted teleport request.');
+            }
             if (jsonMsg.translate && jsonMsg.translate.startsWith('death') && message.startsWith(this.name)) {
                 console.log('Agent died: ', message);
                 let death_pos = this.bot.entity.position;
