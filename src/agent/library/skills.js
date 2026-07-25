@@ -49,7 +49,9 @@ async function safeDig(bot, block, forceLook = true) {
 
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
         const current = getCurrentBlock();
-        if (!current || current.name === 'air' || current.name === 'water' || current.name === 'lava') return true;
+        if (!current || current.name === 'air' || current.name === 'water' || current.name === 'lava') {
+            return true;
+        }
 
         const expectedDigTime = Math.max(1000, bot.digTime?.(current) ?? 1000);
         const timeoutMs = Math.min(Math.max(expectedDigTime + 3000, 5000), 30000);
@@ -67,12 +69,16 @@ async function safeDig(bot, block, forceLook = true) {
             if (bot.targetDigBlock) {
                 try { bot.stopDigging(); } catch (_) { /* ignore cleanup errors */ }
             }
-            if (!timedOut && !String(err?.message ?? err).includes('Digging aborted')) throw err;
+            if (!timedOut && !String(err?.message ?? err).includes('Digging aborted')) {
+                throw err;
+            }
         }
 
         await new Promise(resolve => setTimeout(resolve, VERIFY_DELAY_MS));
         const after = getCurrentBlock();
-        if (!after || after.name !== current.name) return true;
+        if (!after || after.name !== current.name) {
+            return true;
+        }
         log(bot, `Dig attempt ${attempt}/${MAX_ATTEMPTS} did not break ${current.name} at ${current.position}. Retrying.`);
     }
 
@@ -443,37 +449,98 @@ export async function attackEntity(bot, entity, kill=true) {
     }
 }
 
-export async function defendSelf(bot, range=9) {
+export async function warningStrike(bot, player, {
+    maxApproachDistance = 12,
+    timeoutMs = 5000,
+} = {}) {
+    /** Deliver exactly one non-lethal warning hit to a tracked player. */
+    if (!player || player.isValid === false || !player.position) return false;
+    const tracked = () => bot.entities?.[player.id] === player ||
+        bot.entities?.[String(player.id)] === player;
+    if (!tracked()) return false;
+
+    const initialDistance = bot.entity.position.distanceTo(player.position);
+    if (initialDistance > maxApproachDistance) return false;
+    await equipHighestAttack(bot);
+    const deadline = Date.now() + timeoutMs;
+    if (initialDistance > 4) {
+        try {
+            bot.pathfinder.setMovements(new pf.Movements(bot));
+            await Promise.race([
+                bot.pathfinder.goto(new pf.goals.GoalFollow(player, 3.5), true),
+                new Promise(resolve => setTimeout(resolve, timeoutMs)),
+            ]);
+        } catch (err) {/* player may move or path may fail */}
+    }
+    if (Date.now() > deadline || bot.interrupt_code || !tracked() ||
+        bot.entity.position.distanceTo(player.position) > 5) return false;
+    await bot.attack(player);
+    log(bot, `Delivered one warning strike to ${player.username ?? player.name}.`);
+    return true;
+}
+
+export async function defendSelf(bot, range=9, preferredEnemy=null) {
     /**
-     * Defend yourself from all nearby hostile mobs until there are no more.
-     * @param {MinecraftBot} bot, reference to the minecraft bot.
-     * @param {number} range, the range to look for mobs. Defaults to 8.
-     * @returns {Promise<boolean>} true if the bot found any enemies and has killed them, false if no entities were found.
-     * @example
-     * await skills.defendSelf(bot);
-     * **/
+     * Defend yourself from a recent attacker, then nearby hostile mobs until clear.
+     * A preferred attacker may be outside the normal proximity scan.
+     * @param {MinecraftBot} bot, reference to the Minecraft bot.
+     * @param {number} range, range used for additional nearby enemies.
+     * @param {Entity|null} preferredEnemy, the entity that most recently hurt the bot.
+     * @returns {Promise<boolean>} true if an enemy was fought, false otherwise.
+     **/
     bot.modes.pause('self_defense');
     bot.modes.pause('cowardice');
     let attacked = false;
-    let enemy = world.getNearestEntityWhere(bot, entity => mc.isHostile(entity), range);
+    let enemy = preferredEnemy && preferredEnemy.isValid !== false &&
+        mc.canRetaliateAgainst(preferredEnemy)
+        ? preferredEnemy
+        : world.getNearestEntityWhere(bot, entity => mc.isHostile(entity), range);
+    if (preferredEnemy && enemy) {
+        const distance = bot.entity.position.distanceTo(enemy.position);
+        const verticalDifference = Math.abs(bot.entity.position.y - enemy.position.y);
+        if (distance > 48 || verticalDifference > 12 || !await world.isClearPath(bot, enemy)) {
+            log(bot, `Stopping retaliation: attacker is no longer safely reachable.`);
+            return false;
+        }
+    }
     while (enemy) {
         await equipHighestAttack(bot);
         if (bot.entity.position.distanceTo(enemy.position) >= 4 && enemy.name !== 'creeper' && enemy.name !== 'phantom') {
             try {
-                bot.pathfinder.setMovements(new pf.Movements(bot));
+                const movements = new pf.Movements(bot);
+                movements.canDig = false;
+                movements.canPlaceOn = false;
+                movements.canOpenDoors = false;
+                movements.allow1by1towers = false;
+                bot.pathfinder.setMovements(movements);
                 await bot.pathfinder.goto(new pf.goals.GoalFollow(enemy, 3.5), true);
             } catch (err) {/* might error if entity dies, ignore */}
         }
         if (bot.entity.position.distanceTo(enemy.position) <= 2) {
             try {
-                bot.pathfinder.setMovements(new pf.Movements(bot));
+                const movements = new pf.Movements(bot);
+                movements.canDig = false;
+                movements.canPlaceOn = false;
+                movements.allow1by1towers = false;
+                bot.pathfinder.setMovements(movements);
                 let inverted_goal = new pf.goals.GoalInvert(new pf.goals.GoalFollow(enemy, 2));
                 await bot.pathfinder.goto(inverted_goal, true);
             } catch (err) {/* might error if entity dies, ignore */}
         }
         bot.pvp.attack(enemy);
         attacked = true;
-        await new Promise(resolve => setTimeout(resolve, 500));
+        if (preferredEnemy === enemy) {
+            const pursuitDeadline = Date.now() + 30000;
+            const preferredId = enemy.id;
+            while (Date.now() < pursuitDeadline && !bot.interrupt_code &&
+                enemy.isValid !== false &&
+                (bot.entities?.[preferredId] === enemy || bot.entities?.[String(preferredId)] === enemy)) {
+                await new Promise(resolve => setTimeout(resolve, 250));
+            }
+        } else {
+            await new Promise(resolve => setTimeout(resolve, 500));
+        }
+        preferredEnemy = null;
         enemy = world.getNearestEntityWhere(bot, entity => mc.isHostile(entity), range);
         if (bot.interrupt_code) {
             bot.pvp.stop();
@@ -520,11 +587,11 @@ export async function collectBlock(bot, blockType, num=1, exclude=null) {
         nether_quartz: ['nether_quartz_ore'],
         ancient_debris: ['ancient_debris'],
     };
-    if (oreAliases[blockType]) {
-        blocktypes.push(...oreAliases[blockType]);
-    }
+    const aliases = [blockType];
+    if (oreAliases[blockType]) aliases.push(...oreAliases[blockType]);
     if (blockType.endsWith('ore') && !blockType.startsWith('deepslate_') && !blockType.startsWith('nether_'))
-        blocktypes.push('deepslate_'+blockType);
+        aliases.push(`deepslate_${blockType}`);
+    blocktypes.push(...aliases.slice(1));
     if (blockType === 'dirt')
         blocktypes.push('grass_block');
     if (blockType === 'cobblestone')
@@ -589,8 +656,7 @@ export async function collectBlock(bot, blockType, num=1, exclude=null) {
             }
             else if (mc.mustCollectManually(blockType)) {
                 await goToPosition(bot, block.position.x, block.position.y, block.position.z, 2);
-                const dug = await safeDig(bot, block);
-                if (!dug) throw new Error(`Server did not confirm breaking ${block.name}.`);
+                await safeDig(bot, block);
                 await pickupNearbyItems(bot);
                 success = true;
             }
@@ -1198,8 +1264,7 @@ export async function goToGoal(bot, goal) {
 
     bot.pathfinder.setMovements(final_movements);
     try {
-        bot.setMaxListeners?.(Math.max(bot.getMaxListeners?.() ?? 10, 50));
-        await withSafeDigTime(bot, () => bot.pathfinder.goto(goal));
+        await bot.pathfinder.goto(goal);
         clearInterval(doorCheckInterval);
         return true;
     } catch (err) {
@@ -1456,7 +1521,7 @@ export async function goToPlayer(bot, username, distance=3) {
 
     bot.modes.pause('self_defense');
     bot.modes.pause('cowardice');
-    let player = bot.players[username].entity
+    let player = bot.players[username]?.entity
     if (!player) {
         log(bot, `Could not find ${username}.`);
         return false;
@@ -2109,6 +2174,10 @@ export async function goToSurface(bot) {
      * @param {MinecraftBot} bot, reference to the minecraft bot.
      * @returns {Promise<boolean>} true if the surface was reached, false otherwise.
      **/
+    if (bot.game.dimension !== 'overworld') {
+        log(bot, `goToSurface is disabled in ${bot.game.dimension}; use local mining/navigation instead.`);
+        return false;
+    }
     const pos = bot.entity.position;
     for (let y = 360; y > -64; y--) { // probably not the best way to find the surface but it works
         const block = bot.blockAt(new Vec3(pos.x, y, pos.z));

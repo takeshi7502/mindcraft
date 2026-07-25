@@ -1,3 +1,4 @@
+import process from 'node:process';
 import { History } from './history.js';
 import { Coder } from './coder.js';
 import { VisionInterpreter } from './vision/vision_interpreter.js';
@@ -14,9 +15,20 @@ import { handleTranslation, handleEnglishTranslation } from '../utils/translator
 import { addBrowserViewer } from './vision/browser_viewer.js';
 import { serverProxy, sendOutputToServer } from './mindserver_proxy.js';
 import settings from './settings.js';
+import { prepareIncomingChat, resolveChatGateOptions } from './chat_gate.js';
 import { Task } from './tasks/tasks.js';
+import { TaskScheduler, TaskType } from './task_scheduler.js';
+import {
+    clearAttacker,
+    clearDamageCorrelator,
+    clearPlayerCombatState,
+    createDamageCorrelator,
+    recordHealthLoss,
+    recordHurtSource,
+    rememberAttacker,
+} from './library/combat_targeting.js';
 import { speak } from './speak.js';
-import { log, validateNameFormat, handleDisconnection } from './connection_handler.js';
+import { handleDisconnection, log, validateNameFormat } from './connection_handler.js';
 import {
     getDirectTpaTarget,
     isDirectTpaRequest,
@@ -29,9 +41,14 @@ export class Agent {
         this.last_sender = null;
         this.count_id = count_id;
         this._disconnectHandled = false;
+        this._sameProcessRejoin = false;
+        this._replacementStarting = false;
+        this._rejoinAttempts = 0;
+        this._updateLoopStarted = false;
 
         // Initialize components
         this.actions = new ActionManager(this);
+        this.taskScheduler = new TaskScheduler(this);
         this.prompter = new Prompter(this, settings.profile);
         this.name = (this.prompter.getName() || '').trim();
         console.log(`Initializing agent ${this.name}...`);
@@ -70,52 +87,37 @@ export class Agent {
 
         console.log(this.name, 'logging into minecraft...');
         this.bot = initBot(this.name);
+        const initialBot = this.bot;
         
-        // Connection Handler
-        const onDisconnect = (event, reason) => {
-            if (this._disconnectHandled) return;
-            this._disconnectHandled = true;
-
-            // Log and Analyze
-            // handleDisconnection handles logging to console and server
-            const { type } = handleDisconnection(this.name, reason);
-     
-            process.exit(1);
-        };
-        
-        // Bind events
-        this.bot.once('kicked', (reason) => onDisconnect('Kicked', reason));
-        this.bot.once('end', (reason) => onDisconnect('Disconnected', reason));
-        this.bot.on('error', (err) => {
-            if (String(err).includes('Duplicate') || String(err).includes('ECONNREFUSED')) {
-                 onDisconnect('Error', err);
-            } else {
-                 log(this.name, `[LoginGuard] Connection Error: ${String(err)}`);
-            }
-        });
+        this._bindMinecraftConnection(initialBot);
 
         initModes(this);
 
-        this.bot.on('login', () => {
+        initialBot.on('login', () => {
+            if (initialBot !== this.bot) return;
             console.log(this.name, 'logged in!');
             serverProxy.login();
             
             // Set skin for profile, requires Fabric Tailor. (https://modrinth.com/mod/fabrictailor)
             if (this.prompter.profile.skin)
-                this.bot.chat(`/skin set URL ${this.prompter.profile.skin.model} ${this.prompter.profile.skin.path}`);
+                initialBot.chat(`/skin set URL ${this.prompter.profile.skin.model} ${this.prompter.profile.skin.path}`);
             else
-                this.bot.chat(`/skin clear`);
+                initialBot.chat(`/skin clear`);
         });
 		const spawnTimeoutDuration = settings.spawn_timeout;
         const spawnTimeout = setTimeout(() => {
             const msg = `Bot has not spawned after ${spawnTimeoutDuration} seconds. Exiting.`;
             log(this.name, msg);
+            this.taskScheduler.clearForShutdown('initial_spawn_timeout');
             process.exit(1);
         }, spawnTimeoutDuration * 1000);
-        this.bot.once('spawn', async () => {
+        this._activeSpawnTimeout = spawnTimeout;
+        initialBot.once('spawn', async () => {
+            if (initialBot !== this.bot || this._disconnectHandled) return;
             try {
                 clearTimeout(spawnTimeout);
-                addBrowserViewer(this.bot, count_id);
+                this._activeSpawnTimeout = null;
+                addBrowserViewer(initialBot, count_id);
                 console.log('Initializing vision intepreter...');
                 this.vision_interpreter = new VisionInterpreter(this, settings.allow_vision);
 
@@ -125,8 +127,8 @@ export class Agent {
                 console.log(`${this.name} spawned.`);
                 this.clearBotLogs();
               
-                this._setupEventHandlers(save_data, init_message);
-                this.startEvents();
+                this._setupEventHandlers(save_data, init_message, { bot: initialBot });
+                this.startEvents({ bot: initialBot });
               
                 if (!load_mem) {
                     if (settings.task) {
@@ -150,7 +152,155 @@ export class Agent {
         });
     }
 
-    async _setupEventHandlers(save_data, init_message) {
+    _worldContext(bot = this.bot) {
+        return {
+            dimension: bot?.game?.dimension ?? null,
+            server: `${String(settings.host)}:${String(settings.port)}`,
+        };
+    }
+
+    _bindMinecraftConnection(bot) {
+        const onDisconnect = (event, reason) => {
+            this._handleMinecraftDisconnect(bot, event, reason).catch(error => {
+                console.error('Minecraft reconnect handling failed:', error);
+                this.taskScheduler.clearForShutdown('reconnect_handler_failed');
+                process.exit(1);
+            });
+        };
+        bot.on('playerLeft', player => {
+            const entity = player?.entity ?? player;
+            clearAttacker(bot, entity);
+            clearPlayerCombatState(bot, entity);
+        });
+
+        bot.on('kicked', reason => onDisconnect('Kicked', reason));
+        bot.once('end', reason => onDisconnect('Disconnected', reason));
+        bot.on('error', err => {
+            if (String(err).includes('Duplicate') || String(err).includes('ECONNREFUSED'))
+                onDisconnect('Error', err);
+            else
+                log(this.name, `[LoginGuard] Connection Error: ${String(err)}`);
+        });
+    }
+
+    async _handleMinecraftDisconnect(bot, event, reason) {
+        if (bot !== this.bot || this._disconnectHandled) return;
+        this._disconnectHandled = true;
+        clearTimeout(this._activeSpawnTimeout);
+        this._activeSpawnTimeout = null;
+        const { type } = handleDisconnection(this.name, reason);
+        const recoverable = this._sameProcessRejoin ||
+            ['network_error', 'server_full', 'maintenance'].includes(type);
+        if (!recoverable) {
+            this.taskScheduler.clearForShutdown(`process_exit:${type}`);
+            process.exit(1);
+            return;
+        }
+
+        if (!this._sameProcessRejoin) {
+            this._sameProcessRejoin = true;
+            this._rejoinAttempts = 0;
+            await this.taskScheduler.suspendForReconnect(
+                `connection_recovery:${type}`,
+                this._worldContext(bot),
+            );
+        }
+        console.warn(`${this.name} ${event}; attempting same-process world rejoin.`);
+        this._beginReplacementConnection(type);
+    }
+
+    _beginReplacementConnection(reason) {
+        if (this._replacementStarting) return;
+        if (this._rejoinAttempts >= 3) {
+            log(this.name, `[TaskRecovery] Rejoin failed after 3 attempts (${reason}).`);
+            this.taskScheduler.clearForShutdown('reconnect_retry_exhausted');
+            process.exit(1);
+            return;
+        }
+        this._replacementStarting = true;
+        const delayMs = Math.min(5000, 1000 * (this._rejoinAttempts + 1));
+        setTimeout(() => {
+            this._replacementStarting = false;
+            this._createReplacementBot();
+        }, delayMs);
+    }
+
+    _createReplacementBot() {
+        this._rejoinAttempts++;
+        this._disconnectHandled = false;
+        const bot = initBot(this.name);
+        this.bot = bot;
+        this._bindMinecraftConnection(bot);
+        initModes(this);
+        this.clearBotLogs();
+
+        bot.on('login', () => {
+            if (bot !== this.bot || this._disconnectHandled) return;
+            console.log(`${this.name} logged in for recovery attempt ${this._rejoinAttempts}.`);
+            serverProxy.login();
+            if (this.prompter.profile.skin)
+                bot.chat(`/skin set URL ${this.prompter.profile.skin.model} ${this.prompter.profile.skin.path}`);
+            else
+                bot.chat('/skin clear');
+        });
+
+        const spawnTimeout = setTimeout(() => {
+            log(this.name, `[TaskRecovery] Rejoin attempt ${this._rejoinAttempts} did not spawn in time.`);
+            try { bot.quit('Mindcraft rejoin timeout'); } catch (_) {
+                this._beginReplacementConnection('spawn_timeout');
+            }
+        }, settings.spawn_timeout * 1000);
+        this._activeSpawnTimeout = spawnTimeout;
+
+        bot.once('spawn', async () => {
+            if (bot !== this.bot || this._disconnectHandled) return;
+            clearTimeout(spawnTimeout);
+            this._activeSpawnTimeout = null;
+            try {
+                await new Promise(resolve => setTimeout(resolve, 1000));
+                this.vision_interpreter = new VisionInterpreter(this, settings.allow_vision);
+                await this._setupEventHandlers(null, null, { bot, sessionInit: false });
+                this.startEvents({ bot });
+                const recovery = await this.taskScheduler.resumeAfterReconnect(
+                    this._worldContext(bot),
+                );
+                this._sameProcessRejoin = false;
+                this._rejoinAttempts = 0;
+                this._disconnectHandled = false;
+                const message = `[TaskRecovery] ${recovery.message}`;
+                console.log(message);
+                if (settings.chat_ingame) bot.chat(message);
+                sendOutputToServer(this.name, message);
+            } catch (error) {
+                console.error('Error restoring after world rejoin:', error);
+                try { bot.quit('Mindcraft recovery validation failed'); } catch (_) {
+                    this._beginReplacementConnection('restore_failed');
+                }
+            }
+        });
+    }
+
+    async rejoinWorld(reason = 'requested_rejoin') {
+        if (this._sameProcessRejoin)
+            return 'A same-process world rejoin is already in progress.';
+        this._sameProcessRejoin = true;
+        this._rejoinAttempts = 0;
+        const suspension = await this.taskScheduler.suspendForReconnect(
+            reason,
+            this._worldContext(),
+        );
+        try {
+            this.bot.quit('Mindcraft same-process task recovery');
+        } catch (error) {
+            console.warn('Graceful world leave failed; starting replacement connection:', error);
+            this._beginReplacementConnection('leave_failed');
+        }
+        return `${suspension.message} Rejoining now; eligible tasks will be validated after spawn.`;
+    }
+    async _setupEventHandlers(save_data, init_message, {
+        bot = this.bot,
+        sessionInit = true,
+    } = {}) {
         const ignore_messages = [
             "Set own game mode to",
             "Set the time to",
@@ -160,12 +310,17 @@ export class Agent {
             "Gamerule "
         ];
         
-        const respondFunc = async (username, message) => {
+        const respondFunc = async (username, message, { inGame = false } = {}) => {
             if (message === "") return;
             if (username === this.name) return;
             if (settings.only_chat_with.length > 0 && !settings.only_chat_with.includes(username)) return;
             try {
                 if (ignore_messages.some((m) => message.startsWith(m))) return;
+
+                const gateOptions = resolveChatGateOptions(this.prompter.profile);
+                const incoming = prepareIncomingChat(message, { inGame, ...gateOptions });
+                if (!incoming.accepted) return;
+                message = incoming.message;
 
                 this.shut_up = false;
 
@@ -185,20 +340,24 @@ export class Agent {
 
 		this.respondFunc = respondFunc;
 
-        this.bot.on('whisper', respondFunc);
+        bot.on('whisper', (username, message) => {
+            respondFunc(username, message, { inGame: true });
+        });
         
-        this.bot.on('chat', (username, message) => {
+        bot.on('chat', (username, message) => {
             if (serverProxy.getNumOtherAgents() > 0) return;
             // only respond to open chat messages when there are no other agents
-            respondFunc(username, message);
+            respondFunc(username, message, { inGame: true });
         });
 
         // Set up auto-eat
-        this.bot.autoEat.options = {
+        bot.autoEat.options = {
             priority: 'foodPoints',
             startAt: 14,
             bannedFood: ["rotten_flesh", "spider_eye", "poisonous_potato", "pufferfish", "chicken"]
         };
+
+        if (!sessionInit) return;
 
         if (save_data?.self_prompt) {
             if (init_message) {
@@ -237,11 +396,13 @@ export class Agent {
     }
 
     requestInterrupt() {
-        this.bot.interrupt_code = true;
-        this.bot.stopDigging();
-        this.bot.collectBlock.cancelTask();
-        this.bot.pathfinder.stop();
-        this.bot.pvp.stop();
+        const bot = this.bot;
+        if (!bot) return;
+        bot.interrupt_code = true;
+        try { bot.stopDigging?.(); } catch (_) { /* The connection may already be closed. */ }
+        try { bot.collectBlock?.cancelTask?.(); } catch (_) { /* The connection may already be closed. */ }
+        try { bot.pathfinder?.stop?.(); } catch (_) { /* The connection may already be closed. */ }
+        try { bot.pvp?.stop?.(); } catch (_) { /* The connection may already be closed. */ }
     }
 
     clearBotLogs() {
@@ -273,6 +434,8 @@ export class Agent {
         }
 
         const self_prompt = source === 'system' || source === this.name;
+        if (!self_prompt)
+            this.last_sender = source;
         const from_other_bot = convoManager.isOtherAgent(source);
 
         if (!self_prompt && !from_other_bot && isDirectTpaRequest(message)) {
@@ -297,15 +460,16 @@ export class Agent {
                     // add the preceding message to the history to give context for newAction
                     this.history.add(source, message);
                 }
-                let execute_res = await executeCommand(this, message);
+                let execute_res = await executeCommand(this, message, { source });
                 if (execute_res) 
                     this.routeResponse(source, execute_res);
                 return true;
             }
         }
 
-        if (from_other_bot)
+        if (from_other_bot) {
             this.last_sender = source;
+        }
 
         // Now translate the message
         message = await handleEnglishTranslation(message);
@@ -374,7 +538,8 @@ export class Agent {
                         this.routeResponse(source, pre_message);
                 }
 
-                let execute_res = await executeCommand(this, res);
+                const commandSource = self_prompt && this.last_sender ? this.last_sender : source;
+                let execute_res = await executeCommand(this, res, { source: commandSource });
 
                 console.log('Agent executed:', command_name, 'and got:', execute_res);
                 used_command = true;
@@ -443,79 +608,109 @@ export class Agent {
         }
     }
 
-    startEvents() {
+    startEvents({ bot = this.bot } = {}) {
         // Custom events
-        this.bot.on('time', () => {
-            if (this.bot.time.timeOfDay == 0)
-            this.bot.emit('sunrise');
-            else if (this.bot.time.timeOfDay == 6000)
-            this.bot.emit('noon');
-            else if (this.bot.time.timeOfDay == 12000)
-            this.bot.emit('sunset');
-            else if (this.bot.time.timeOfDay == 18000)
-            this.bot.emit('midnight');
+        bot.on('time', () => {
+            if (bot.time.timeOfDay == 0)
+            bot.emit('sunrise');
+            else if (bot.time.timeOfDay == 6000)
+            bot.emit('noon');
+            else if (bot.time.timeOfDay == 12000)
+            bot.emit('sunset');
+            else if (bot.time.timeOfDay == 18000)
+            bot.emit('midnight');
         });
 
-        let prev_health = this.bot.health;
-        this.bot.lastDamageTime = 0;
-        this.bot.lastDamageTaken = 0;
-        this.bot.on('health', () => {
-            if (this.bot.health < prev_health) {
-                this.bot.lastDamageTime = Date.now();
-                this.bot.lastDamageTaken = prev_health - this.bot.health;
+        let prev_health = bot.health;
+        bot.lastDamageTime = 0;
+        bot.lastDamageTaken = 0;
+        bot.retaliationTarget = null;
+        bot.playerWarningStrike = null;
+        bot.playerRetaliationHistory = new Map();
+        bot.damageCorrelator = createDamageCorrelator();
+        const commitDamage = correlated => {
+            if (!correlated) return;
+            const response = rememberAttacker(bot, correlated.source, {
+                now: correlated.timestamp,
+                playerPolicy: {
+                    enabled: settings.allow_player_retaliation,
+                },
+            });
+            if (response.attacker) bot.lastDamageTime = correlated.timestamp;
+        };
+        bot.on('health', () => {
+            if (bot.health < prev_health) {
+                const damage = prev_health - bot.health;
+                bot.lastDamageTime = Date.now();
+                bot.lastDamageTaken = damage;
+                commitDamage(recordHealthLoss(bot.damageCorrelator, damage));
             }
-            prev_health = this.bot.health;
+            prev_health = bot.health;
+        });
+        bot.on('entityHurt', (entity, source) => {
+            if (entity !== bot.entity || !source) return;
+            commitDamage(recordHurtSource(bot.damageCorrelator, source));
         });
         // Logging callbacks
-        this.bot.on('error' , (err) => {
+        bot.on('error' , (err) => {
             console.error('Error event!', err);
         });
-        // Use connection handler for runtime disconnects
-        this.bot.on('end', (reason) => {
-            if (!this._disconnectHandled) {
-                const { msg } = handleDisconnection(this.name, reason);
-                this.cleanKill(msg);
-            }
-        });
-        this.bot.on('death', () => {
+
+        bot.on('death', () => {
+            clearAttacker(bot);
+            clearDamageCorrelator(bot.damageCorrelator);
+            clearPlayerCombatState(bot);
+            this.taskScheduler.terminateWhere(() => true, 'bot_died');
             this.actions.cancelResume();
             this.actions.stop();
         });
-        this.bot.on('kicked', (reason) => {
-            if (!this._disconnectHandled) {
-                const { msg } = handleDisconnection(this.name, reason);
-                this.cleanKill(msg);
-            }
+        bot.on('entityDead', entity => {
+            clearAttacker(bot, entity);
+            clearPlayerCombatState(bot, entity);
+            const playerName = entity?.username;
+            if (!playerName) return;
+            this.taskScheduler.terminateWhere(record =>
+                record.type === TaskType.PERSISTENT &&
+                record.target?.player === playerName &&
+                record.terminalConditions.includes('target_died'), 'follow_target_died');
         });
-        this.bot.on('messagestr', async (message, _, jsonMsg) => {
-            if (maybeAutoAcceptTpa(this.bot, message)) {
+
+        bot.on('messagestr', async (message, _, jsonMsg) => {
+            if (maybeAutoAcceptTpa(bot, message)) {
                 log(this.name, '[TPA] Accepted teleport request.');
             }
             if (jsonMsg.translate && jsonMsg.translate.startsWith('death') && message.startsWith(this.name)) {
                 console.log('Agent died: ', message);
-                let death_pos = this.bot.entity.position;
+                let death_pos = bot.entity.position;
                 this.memory_bank.rememberPlace('last_death_position', death_pos.x, death_pos.y, death_pos.z);
                 let death_pos_text = null;
                 if (death_pos) {
                     death_pos_text = `x: ${death_pos.x.toFixed(2)}, y: ${death_pos.y.toFixed(2)}, z: ${death_pos.z.toFixed(2)}`;
                 }
-                let dimention = this.bot.game.dimension;
+                let dimention = bot.game.dimension;
                 this.handleMessage('system', `You died at position ${death_pos_text || "unknown"} in the ${dimention} dimension with the final message: '${message}'. Your place of death is saved as 'last_death_position' if you want to return. Previous actions were stopped and you have respawned.`);
             }
         });
-        this.bot.on('idle', () => {
-            this.bot.clearControlStates();
-            this.bot.pathfinder.stop(); // clear any lingering pathfinder
-            this.bot.modes.unPauseAll();
-            setTimeout(() => {
+        bot.on('idle', () => {
+            bot.clearControlStates();
+            bot.pathfinder.stop(); // clear any lingering pathfinder
+            bot.modes.unPauseAll();
+            setTimeout(async () => {
+                if (bot !== this.bot || this._sameProcessRejoin) return;
                 if (this.isIdle()) {
-                    this.actions.resumeAction();
+                    const resumedScheduledTask = await this.taskScheduler.resumePending();
+                    if (!resumedScheduledTask) this.actions.resumeAction();
                 }
             }, 1000);
         });
 
         // Init NPC controller
         this.npc.init();
+        if (this._updateLoopStarted) {
+            bot.emit('idle');
+            return;
+        }
+        this._updateLoopStarted = true;
 
         // This update loop ensures that each update() is called one at a time, even if it takes longer than the interval
         const INTERVAL = 300;
@@ -532,10 +727,11 @@ export class Agent {
             }
         }, INTERVAL);
 
-        this.bot.emit('idle');
+        bot.emit('idle');
     }
 
     async update(delta) {
+        if (this._sameProcessRejoin) return;
         await this.bot.modes.update();
         this.self_prompter.update(delta);
         await this.checkTaskDone();
@@ -547,6 +743,8 @@ export class Agent {
     
 
     cleanKill(msg='Killing agent process...', code=1) {
+        this._sameProcessRejoin = false;
+        this.taskScheduler?.clearForShutdown('process_shutdown');
         this.history.add('system', msg);
         this.bot.chat(code > 1 ? 'Restarting.': 'Exiting.');
         this.history.save();

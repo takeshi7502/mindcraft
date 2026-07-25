@@ -13,11 +13,11 @@ export function getFullState(agent) {
     const bot = agent.bot;
 
     const pos = getPosition(bot);
-    const position = {
+    const position = pos ? {
         x: Number(pos.x.toFixed(2)),
         y: Number(pos.y.toFixed(2)),
         z: Number(pos.z.toFixed(2))
-    };
+    } : null;
 
     let weather = 'Clear';
     if (bot.thunderState > 0) weather = 'Thunderstorm';

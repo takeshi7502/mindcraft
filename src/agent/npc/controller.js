@@ -65,11 +65,12 @@ export class NPCContoller {
             }
         }
 
-        this.agent.bot.on('idle', async () => {
+        const bot = this.agent.bot;
+        bot.on('idle', async () => {
             if (this.data.goals.length === 0 && !this.data.curr_goal) return;
             // Wait a while for inputs before acting independently
             await new Promise((resolve) => setTimeout(resolve, 5000));
-            if (!this.agent.isIdle()) return;
+            if (bot !== this.agent.bot || this.agent._sameProcessRejoin || !this.agent.isIdle()) return;
 
             // Persue goal
             if (!this.agent.actions.resume_func) {

@@ -1,4 +1,4 @@
-﻿const TPA_REQUEST_PATTERNS = [
+const TPA_REQUEST_PATTERNS = [
     /(?:has requested|wants) to teleport to you/i,
     /type\s+\/tpaccept/i,
     /teleport request (?:from|by)\s+([A-Za-z0-9_]{1,16})/i,
@@ -7,8 +7,8 @@
 const PLAYER_NAME = /^\.?[A-Za-z0-9_]{1,16}$/;
 const ACCEPT_COOLDOWN_MS = 3000;
 const DIRECT_TPA_KEYWORDS = /(?:^|\s)(?:tp|tpa|teleport)(?:\s|$)/i;
-const DIRECT_TPA_SELF_TARGET = /(?:t├┤i|toi|me|here|─æ├óy|day)/i;
-const DIRECT_TPA_NAMED_TARGET = /(?:─æß║┐n|toi|tß╗¢i|to)\s+(\.?[A-Za-z0-9_]{1,16})/i;
+const DIRECT_TPA_SELF_TARGET = /(?:tôi|toi|me|here|đây|day)/i;
+const DIRECT_TPA_NAMED_TARGET = /(?:đến|toi|tới|to)\s+(\.?[A-Za-z0-9_]{1,16})/i;
 
 function normalizePlayerName(bot, playerName) {
     const raw = String(playerName ?? '').trim();

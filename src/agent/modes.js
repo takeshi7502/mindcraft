@@ -1,5 +1,11 @@
 import * as skills from './library/skills.js';
 import * as world from './library/world.js';
+import {
+    consumeWarningStrike,
+    getRecentAttacker,
+} from './library/combat_targeting.js';
+import { observeProactiveThreat } from './library/combat_observation.js';
+import { cleanupInventory } from './library/inventory_cleanup.js';
 import * as mc from '../utils/mcdata.js';
 import settings from './settings.js'
 import convoManager from './conversation.js';
@@ -107,14 +113,10 @@ const modes_list = [
             }
             const bot = agent.bot;
             const cur_dig_block = bot.targetDigBlock;
-            if (cur_dig_block) {
-                this.prev_location = bot.entity.position.clone();
-                this.stuck_time = 0;
+            if (cur_dig_block && !this.prev_dig_block) {
                 this.prev_dig_block = cur_dig_block;
-                this.last_time = Date.now();
-                return;
             }
-            if (this.prev_location && this.prev_location.distanceTo(bot.entity.position) < this.distance) {
+            if (this.prev_location && this.prev_location.distanceTo(bot.entity.position) < this.distance && cur_dig_block == this.prev_dig_block) {
                 this.stuck_time += (Date.now() - this.last_time) / 1000;
             }
             else {
@@ -127,7 +129,7 @@ const modes_list = [
                 say(agent, 'I\'m stuck!');
                 this.stuck_time = 0;
                 execute(this, agent, async () => {
-                    const crashTimeout = setTimeout(() => { agent.cleanKill("Got stuck and couldn't get unstuck") }, 10000);
+                    const crashTimeout = setTimeout(() => { void agent.rejoinWorld('unstuck_recovery'); }, 10000);
                     await skills.moveAway(bot, 5);
                     clearTimeout(crashTimeout);
                     say(agent, 'I\'m free.');
@@ -148,8 +150,10 @@ const modes_list = [
         on: true,
         active: false,
         update: async function (agent) {
-            const enemy = world.getNearestEntityWhere(agent.bot, entity => mc.isHostile(entity), 16);
-            if (enemy && await world.isClearPath(agent.bot, enemy)) {
+            const { entity: enemy } = await observeProactiveThreat(agent.bot, {
+                maxDistance: 16,
+            });
+            if (enemy) {
                 say(agent, `Aaa! A ${enemy.name.replace("_", " ")}!`);
                 execute(this, agent, async () => {
                     await skills.avoidEnemies(agent.bot, 24);
@@ -159,13 +163,33 @@ const modes_list = [
     },
     {
         name: 'self_defense',
-        description: 'Attack nearby enemies. Interrupts all actions.',
+        description: 'Retaliate against recent attackers at any tracked distance, otherwise attack nearby hostile enemies.',
         interrupts: ['all'],
         on: true,
         active: false,
         update: async function (agent) {
-            const enemy = world.getNearestEntityWhere(agent.bot, entity => mc.isHostile(entity), 8);
-            if (enemy && await world.isClearPath(agent.bot, enemy)) {
+            const attacker = getRecentAttacker(agent.bot);
+            if (attacker) {
+                say(agent, `Retaliating against ${attacker.username ?? attacker.name}!`);
+                execute(this, agent, async () => {
+                    await skills.defendSelf(agent.bot, 8, attacker);
+                });
+                return;
+            }
+
+            const warningTarget = consumeWarningStrike(agent.bot);
+            if (warningTarget) {
+                say(agent, `Warning ${warningTarget.username ?? warningTarget.name} to stop attacking!`);
+                execute(this, agent, async () => {
+                    await skills.warningStrike(agent.bot, warningTarget);
+                });
+                return;
+            }
+
+            const { entity: enemy } = await observeProactiveThreat(agent.bot, {
+                maxDistance: 8,
+            });
+            if (enemy) {
                 say(agent, `Fighting ${enemy.name}!`);
                 execute(this, agent, async () => {
                     await skills.defendSelf(agent.bot, 8);
@@ -218,6 +242,28 @@ const modes_list = [
             else {
                 this.noticed_at = -1;
             }
+        }
+    },
+    {
+        name: 'inventory_cleanup',
+        description: 'Clean inventory when it is almost full by using a nearby chest first, then discarding safe junk/overflow.',
+        interrupts: ['action:followPlayer'],
+        on: true,
+        active: false,
+        cooldown: 10,
+        last_cleanup: 0,
+        update: async function (agent) {
+            if ((agent.bot.inventory.emptySlotCount?.() ?? 0) > 1) return;
+            if (Date.now() - this.last_cleanup < this.cooldown * 1000) return;
+            this.last_cleanup = Date.now();
+            execute(this, agent, async () => {
+                const result = await cleanupInventory(agent.bot);
+                if (result.success) {
+                    say(agent, `Cleaned inventory: deposited ${result.deposited}, discarded ${result.discarded}.`);
+                } else {
+                    this.last_cleanup = Date.now() + 60 * 1000;
+                }
+            });
         }
     },
     {
@@ -308,9 +354,15 @@ const modes_list = [
 ];
 
 async function execute(mode, agent, func, timeout=-1) {
+    const currentAction = agent.actions.currentActionLabel || '';
+    const lowPriorityModes = ['unstuck', 'item_collecting', 'inventory_cleanup', 'torch_placing', 'elbow_room'];
+    if (currentAction.startsWith('task:') && lowPriorityModes.includes(mode.name)) {
+        mode.active = false;
+        return;
+    }
     if (agent.self_prompter.isActive())
         agent.self_prompter.stopLoop();
-    let interrupted_action = agent.actions.currentActionLabel;
+    let interrupted_action = currentAction;
     mode.active = true;
     let code_return = await agent.actions.runAction(`mode:${mode.name}`, async () => {
         await func();

@@ -20,6 +20,7 @@
         "self_defense": true,
         "hunting": true,
         "item_collecting": true,
+        "inventory_cleanup": true,
         "torch_placing": true,
         "elbow_room": true,
         "idle_staring": true,
