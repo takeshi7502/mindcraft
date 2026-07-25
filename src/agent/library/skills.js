@@ -574,21 +574,25 @@ export async function collectBlock(bot, blockType, num=1, exclude=null) {
     }
     let blocktypes = [blockType];
     const oreAliases = {
-        coal: ['coal_ore', 'deepslate_coal_ore'],
-        diamond: ['diamond_ore', 'deepslate_diamond_ore'],
-        emerald: ['emerald_ore', 'deepslate_emerald_ore'],
-        iron: ['iron_ore', 'deepslate_iron_ore'],
-        gold: ['gold_ore', 'deepslate_gold_ore', 'nether_gold_ore'],
-        copper: ['copper_ore', 'deepslate_copper_ore'],
-        lapis_lazuli: ['lapis_ore', 'deepslate_lapis_ore'],
-        lapis: ['lapis_ore', 'deepslate_lapis_ore'],
-        redstone: ['redstone_ore', 'deepslate_redstone_ore'],
-        quartz: ['nether_quartz_ore'],
-        nether_quartz: ['nether_quartz_ore'],
-        ancient_debris: ['ancient_debris'],
+        coal: { blocks: ['coal_ore', 'deepslate_coal_ore'], items: ['coal'] },
+        diamond: { blocks: ['diamond_ore', 'deepslate_diamond_ore'], items: ['diamond'] },
+        emerald: { blocks: ['emerald_ore', 'deepslate_emerald_ore'], items: ['emerald'] },
+        iron: { blocks: ['iron_ore', 'deepslate_iron_ore'], items: ['raw_iron', 'iron_ore', 'deepslate_iron_ore'] },
+        gold: { blocks: ['gold_ore', 'deepslate_gold_ore', 'nether_gold_ore'], items: ['raw_gold', 'gold_nugget', 'gold_ore', 'deepslate_gold_ore', 'nether_gold_ore'] },
+        copper: { blocks: ['copper_ore', 'deepslate_copper_ore'], items: ['raw_copper', 'copper_ore', 'deepslate_copper_ore'] },
+        lapis_lazuli: { blocks: ['lapis_ore', 'deepslate_lapis_ore'], items: ['lapis_lazuli'] },
+        lapis: { blocks: ['lapis_ore', 'deepslate_lapis_ore'], items: ['lapis_lazuli'] },
+        redstone: { blocks: ['redstone_ore', 'deepslate_redstone_ore'], items: ['redstone'] },
+        quartz: { blocks: ['nether_quartz_ore'], items: ['quartz'] },
+        nether_quartz: { blocks: ['nether_quartz_ore'], items: ['quartz'] },
+        ancient_debris: { blocks: ['ancient_debris'], items: ['ancient_debris'] },
     };
     const aliases = [blockType];
-    if (oreAliases[blockType]) aliases.push(...oreAliases[blockType]);
+    const itemCountTypes = [blockType];
+    if (oreAliases[blockType]) {
+        aliases.push(...oreAliases[blockType].blocks);
+        itemCountTypes.push(...oreAliases[blockType].items);
+    }
     if (blockType.endsWith('ore') && !blockType.startsWith('deepslate_') && !blockType.startsWith('nether_'))
         aliases.push(`deepslate_${blockType}`);
     blocktypes.push(...aliases.slice(1));
@@ -597,6 +601,12 @@ export async function collectBlock(bot, blockType, num=1, exclude=null) {
     if (blockType === 'cobblestone')
         blocktypes.push('stone');
     const isLiquid = blockType === 'lava' || blockType === 'water';
+    const countCollectedItems = () => {
+        const counts = world.getInventoryCounts(bot);
+        return itemCountTypes.reduce((sum, type) => sum + (counts[type] ?? 0), 0);
+    };
+    const startCount = countCollectedItems();
+    const targetCount = startCount + num;
 
     let collected = 0;
 
@@ -608,6 +618,8 @@ export async function collectBlock(bot, blockType, num=1, exclude=null) {
     const unsafeBlocks = ['obsidian'];
 
     for (let i=0; i<num; i++) {
+        collected = Math.max(0, countCollectedItems() - startCount);
+        if (countCollectedItems() >= targetCount) break;
         let blocks = world.getNearestBlocksWhere(bot, block => {
             if (!blocktypes.includes(block.name)) {
                 return false;
@@ -664,8 +676,9 @@ export async function collectBlock(bot, blockType, num=1, exclude=null) {
                 await withSafeDigTime(bot, () => bot.collectBlock.collect(block));
                 success = true;
             }
-            if (success)
-                collected++;
+            await pickupNearbyItems(bot, 12, 3000);
+            collected = Math.max(0, countCollectedItems() - startCount);
+            if (success && collected >= num) break;
             await autoLight(bot);
         }
         catch (err) {
@@ -682,19 +695,23 @@ export async function collectBlock(bot, blockType, num=1, exclude=null) {
         if (bot.interrupt_code)
             break;  
     }
-    log(bot, `Collected ${collected} ${blockType}.`);
-    return collected > 0;
+    await pickupNearbyItems(bot, 12, 3000);
+    collected = Math.max(0, countCollectedItems() - startCount);
+    log(bot, `Collected ${collected}/${num} ${blockType}.`);
+    return collected >= num;
 }
 
-export async function pickupNearbyItems(bot) {
+export async function pickupNearbyItems(bot, distance=8, settleMs=1200) {
     /**
      * Pick up all nearby items.
      * @param {MinecraftBot} bot, reference to the minecraft bot.
+     * @param {number} distance, pickup search radius.
+     * @param {number} settleMs, time to keep checking for delayed drops.
      * @returns {Promise<boolean>} true if the items were picked up, false otherwise.
      * @example
      * await skills.pickupNearbyItems(bot);
      **/
-    const distance = 8;
+    const deadline = Date.now() + settleMs;
     const getNearestItem = bot => bot.nearestEntity(entity => entity.name === 'item' && bot.entity.position.distanceTo(entity.position) < distance);
     let nearestItem = getNearestItem(bot);
     let pickedUp = 0;
@@ -707,7 +724,8 @@ export async function pickupNearbyItems(bot) {
         let prev = nearestItem;
         nearestItem = getNearestItem(bot);
         if (prev === nearestItem) {
-            break;
+            if (Date.now() >= deadline) break;
+            await new Promise(resolve => setTimeout(resolve, 250));
         }
         pickedUp++;
     }
