@@ -11,6 +11,74 @@ export function log(bot, message) {
     bot.output += message + '\n';
 }
 
+function normalizeDigEnchantments(bot) {
+    const heldItem = bot.heldItem;
+    if (heldItem && !Array.isArray(heldItem.enchants)) heldItem.enchants = [];
+    const headSlot = bot.getEquipmentDestSlot?.('head');
+    const helmet = headSlot != null ? bot.inventory?.slots?.[headSlot] : null;
+    if (helmet && !Array.isArray(helmet.enchants)) helmet.enchants = [];
+}
+
+async function withSafeDigTime(bot, operation) {
+    normalizeDigEnchantments(bot);
+    const originalDigTime = bot.digTime?.bind(bot);
+    if (!originalDigTime) return operation();
+    bot.digTime = (block) => {
+        try {
+            normalizeDigEnchantments(bot);
+            return originalDigTime(block);
+        } catch (err) {
+            if (!String(err?.message ?? err).includes('enchantments is not iterable')) throw err;
+            const type = bot.heldItem ? bot.heldItem.type : null;
+            const creative = bot.game.gameMode === 'creative';
+            const inWater = ['water', 'flowing_water'].includes(bot._getBlockAtEyeLevel?.()?.name);
+            return block.digTime(type, creative, inWater, !bot.entity.onGround, [], bot.entity.effects ?? {});
+        }
+    };
+    try {
+        return await operation();
+    } finally {
+        bot.digTime = originalDigTime;
+    }
+}
+
+async function safeDig(bot, block, forceLook = true) {
+    const MAX_ATTEMPTS = 3;
+    const VERIFY_DELAY_MS = 250;
+    const getCurrentBlock = () => bot.blockAt(block.position);
+
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+        const current = getCurrentBlock();
+        if (!current || current.name === 'air' || current.name === 'water' || current.name === 'lava') return true;
+
+        const expectedDigTime = Math.max(1000, bot.digTime?.(current) ?? 1000);
+        const timeoutMs = Math.min(Math.max(expectedDigTime + 3000, 5000), 30000);
+        let timedOut = false;
+
+        try {
+            await Promise.race([
+                withSafeDigTime(bot, () => bot.dig(current, forceLook, 'raycast')),
+                new Promise((_, reject) => setTimeout(() => {
+                    timedOut = true;
+                    reject(new Error(`Dig timed out after ${timeoutMs}ms`));
+                }, timeoutMs)),
+            ]);
+        } catch (err) {
+            if (bot.targetDigBlock) {
+                try { bot.stopDigging(); } catch (_) { /* ignore cleanup errors */ }
+            }
+            if (!timedOut && !String(err?.message ?? err).includes('Digging aborted')) throw err;
+        }
+
+        await new Promise(resolve => setTimeout(resolve, VERIFY_DELAY_MS));
+        const after = getCurrentBlock();
+        if (!after || after.name !== current.name) return true;
+        log(bot, `Dig attempt ${attempt}/${MAX_ATTEMPTS} did not break ${current.name} at ${current.position}. Retrying.`);
+    }
+
+    return false;
+}
+
 async function autoLight(bot) {
     if (world.shouldPlaceTorch(bot)) {
         try {
@@ -438,9 +506,24 @@ export async function collectBlock(bot, blockType, num=1, exclude=null) {
         return false;
     }
     let blocktypes = [blockType];
-    if (blockType === 'coal' || blockType === 'diamond' || blockType === 'emerald' || blockType === 'iron' || blockType === 'gold' || blockType === 'lapis_lazuli' || blockType === 'redstone')
-        blocktypes.push(blockType+'_ore');
-    if (blockType.endsWith('ore'))
+    const oreAliases = {
+        coal: ['coal_ore', 'deepslate_coal_ore'],
+        diamond: ['diamond_ore', 'deepslate_diamond_ore'],
+        emerald: ['emerald_ore', 'deepslate_emerald_ore'],
+        iron: ['iron_ore', 'deepslate_iron_ore'],
+        gold: ['gold_ore', 'deepslate_gold_ore', 'nether_gold_ore'],
+        copper: ['copper_ore', 'deepslate_copper_ore'],
+        lapis_lazuli: ['lapis_ore', 'deepslate_lapis_ore'],
+        lapis: ['lapis_ore', 'deepslate_lapis_ore'],
+        redstone: ['redstone_ore', 'deepslate_redstone_ore'],
+        quartz: ['nether_quartz_ore'],
+        nether_quartz: ['nether_quartz_ore'],
+        ancient_debris: ['ancient_debris'],
+    };
+    if (oreAliases[blockType]) {
+        blocktypes.push(...oreAliases[blockType]);
+    }
+    if (blockType.endsWith('ore') && !blockType.startsWith('deepslate_') && !blockType.startsWith('nether_'))
         blocktypes.push('deepslate_'+blockType);
     if (blockType === 'dirt')
         blocktypes.push('grass_block');
@@ -506,12 +589,13 @@ export async function collectBlock(bot, blockType, num=1, exclude=null) {
             }
             else if (mc.mustCollectManually(blockType)) {
                 await goToPosition(bot, block.position.x, block.position.y, block.position.z, 2);
-                await bot.dig(block);
+                const dug = await safeDig(bot, block);
+                if (!dug) throw new Error(`Server did not confirm breaking ${block.name}.`);
                 await pickupNearbyItems(bot);
                 success = true;
             }
             else {
-                await bot.collectBlock.collect(block);
+                await withSafeDigTime(bot, () => bot.collectBlock.collect(block));
                 success = true;
             }
             if (success)
@@ -605,7 +689,11 @@ export async function breakBlockAt(bot, x, y, z) {
                 return false;
             }
         }
-        await bot.dig(block, true);
+        const dug = await safeDig(bot, block, true);
+        if (!dug) {
+            log(bot, `Failed to break ${block.name} at x:${x.toFixed(1)}, y:${y.toFixed(1)}, z:${z.toFixed(1)}. The server may be refusing block breaks here.`);
+            return false;
+        }
         log(bot, `Broke ${block.name} at x:${x.toFixed(1)}, y:${y.toFixed(1)}, z:${z.toFixed(1)}.`);
     }
     else {
@@ -1110,7 +1198,8 @@ export async function goToGoal(bot, goal) {
 
     bot.pathfinder.setMovements(final_movements);
     try {
-        await bot.pathfinder.goto(goal);
+        bot.setMaxListeners?.(Math.max(bot.getMaxListeners?.() ?? 10, 50));
+        await withSafeDigTime(bot, () => bot.pathfinder.goto(goal));
         clearInterval(doorCheckInterval);
         return true;
     } catch (err) {
@@ -1239,6 +1328,52 @@ export async function goToPosition(bot, x, y, z, min_distance=2) {
         log(bot, `Pathfinding stopped: ${err.message}.`);
         clearInterval(progressInterval);
         return false;
+    }
+}
+
+export async function mineNearestBlock(bot, blockType, range=64) {
+    /** Find, approach, and break the nearest matching block. */
+    const aliases = [blockType];
+    const oreAliases = {
+        coal: ['coal_ore', 'deepslate_coal_ore'],
+        diamond: ['diamond_ore', 'deepslate_diamond_ore'],
+        emerald: ['emerald_ore', 'deepslate_emerald_ore'],
+        iron: ['iron_ore', 'deepslate_iron_ore'],
+        gold: ['gold_ore', 'deepslate_gold_ore', 'nether_gold_ore'],
+        copper: ['copper_ore', 'deepslate_copper_ore'],
+        lapis_lazuli: ['lapis_ore', 'deepslate_lapis_ore'],
+        lapis: ['lapis_ore', 'deepslate_lapis_ore'],
+        redstone: ['redstone_ore', 'deepslate_redstone_ore'],
+        quartz: ['nether_quartz_ore'],
+        nether_quartz: ['nether_quartz_ore'],
+        ancient_debris: ['ancient_debris'],
+    };
+    if (oreAliases[blockType]) aliases.push(...oreAliases[blockType]);
+    if (blockType.endsWith('ore') && !blockType.startsWith('deepslate_') && !blockType.startsWith('nether_')) aliases.push(`deepslate_${blockType}`);
+
+    const pausedModes = ['unstuck', 'item_collecting', 'inventory_cleanup', 'torch_placing', 'elbow_room', 'cowardice', 'self_defense'];
+    for (const mode of pausedModes) {
+        if (bot.modes.exists(mode)) bot.modes.pause(mode);
+    }
+    try {
+        const block = world.getNearestBlock(bot, aliases, range);
+        if (!block) {
+            log(bot, `Could not find any ${blockType} in ${range} blocks.`);
+            return false;
+        }
+        const current = bot.blockAt(block.position);
+        if (!current || !aliases.includes(current.name)) {
+            log(bot, `${blockType} is no longer at ${block.position}.`);
+            return false;
+        }
+        const broken = await breakBlockAt(bot, current.position.x, current.position.y, current.position.z);
+        if (!broken) return false;
+        await pickupNearbyItems(bot);
+        return true;
+    } finally {
+        for (const mode of pausedModes) {
+            if (bot.modes.exists(mode)) bot.modes.unpause(mode);
+        }
     }
 }
 

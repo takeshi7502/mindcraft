@@ -284,6 +284,38 @@ export const actionsList = [
         }, false, 10) // 10 minute timeout
     },
     {
+        name: '!collectAndGivePlayer',
+        description: 'Collect a requested number of blocks/items, then give them to a player if that player is nearby/visible. Use for requests like mine 10 diamonds for me, get a stack of iron and give it to me.',
+        params: {
+            'player_name': { type: 'string', description: 'The player to give collected items to.' },
+            'type': { type: 'BlockName', description: 'The block/resource type to collect.' },
+            'num': { type: 'int', description: 'The amount to collect and give. A stack means 64 unless the user specifies otherwise.', domain: [1, Number.MAX_SAFE_INTEGER] }
+        },
+        perform: runAsAction(async (agent, player_name, type, num) => {
+            const collected = await skills.collectBlock(agent.bot, type, num);
+            if (!collected) return `Could not collect ${num} ${type}.`;
+            const player = agent.bot.players[player_name]?.entity;
+            if (!player || player.isValid === false || agent.bot.entity.position.distanceTo(player.position) > 32) {
+                return `Collected ${type}, but ${player_name} is not nearby so I will keep it for now.`;
+            }
+            const given = await skills.giveToPlayer(agent.bot, type, player_name, num);
+            return given ? `Collected and gave ${num} ${type} to ${player_name}.` : `Collected ${type}, but could not give it to ${player_name}.`;
+        }, false, 10)
+    },
+    {
+        name: '!mineNearestBlock',
+        description: 'Find, move to, and actually break/mine the nearest block of the given type. Use this for requests like mining diamonds, ancient debris, ores, or blocks; unlike searchForBlock, this breaks the block.',
+        params: {
+            'type': { type: 'BlockName', description: 'The block type to mine.' },
+            'search_range': { type: 'float', description: 'The range to search for the block.', domain: [4, 128] }
+        },
+        perform: runAsAction(async (agent, block_type, range) => {
+            if (range > 128) range = 128;
+            const mined = await skills.mineNearestBlock(agent.bot, block_type, range);
+            return mined ? `Mined nearest ${block_type}.` : `Could not mine ${block_type}.`;
+        }, false, 10)
+    },
+    {
         name: '!craftRecipe',
         description: 'Craft the given recipe a given number of times.',
         params: {

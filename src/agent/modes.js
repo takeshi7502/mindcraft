@@ -107,10 +107,14 @@ const modes_list = [
             }
             const bot = agent.bot;
             const cur_dig_block = bot.targetDigBlock;
-            if (cur_dig_block && !this.prev_dig_block) {
+            if (cur_dig_block) {
+                this.prev_location = bot.entity.position.clone();
+                this.stuck_time = 0;
                 this.prev_dig_block = cur_dig_block;
+                this.last_time = Date.now();
+                return;
             }
-            if (this.prev_location && this.prev_location.distanceTo(bot.entity.position) < this.distance && cur_dig_block == this.prev_dig_block) {
+            if (this.prev_location && this.prev_location.distanceTo(bot.entity.position) < this.distance) {
                 this.stuck_time += (Date.now() - this.last_time) / 1000;
             }
             else {
