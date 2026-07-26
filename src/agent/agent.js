@@ -621,6 +621,12 @@ export class Agent {
             bot.emit('midnight');
         });
 
+        bot.on('playerJoined', (player) => {
+            const username = player?.username;
+            if (!username || username === bot.username) return;
+            bot.chat(`Chào ${username} béo nha!`);
+        });
+
         let prev_health = bot.health;
         bot.lastDamageTime = 0;
         bot.lastDamageTaken = 0;

@@ -6,6 +6,7 @@ import {
 } from './library/combat_targeting.js';
 import { observeProactiveThreat } from './library/combat_observation.js';
 import { cleanupInventory } from './library/inventory_cleanup.js';
+import { requestTpaToPlayer } from './library/teleport_requests.js';
 import * as mc from '../utils/mcdata.js';
 import settings from './settings.js'
 import convoManager from './conversation.js';
@@ -306,6 +307,46 @@ const modes_list = [
                     }
                 });
             }
+        }
+    },
+    {
+        name: 'idle_social_tpa',
+        description: 'When idle for a while, randomly TPA to an online player and follow them if accepted.',
+        interrupts: [],
+        on: true,
+        active: false,
+        interval: 10 * 60 * 1000,
+        accept_wait: 5000,
+        last_tpa: Date.now(),
+        update: async function (agent) {
+            if (!agent.isIdle()) return;
+            if (Date.now() - this.last_tpa < this.interval) return;
+            this.last_tpa = Date.now();
+            const bot = agent.bot;
+            const candidates = Object.keys(bot.players ?? {})
+                .filter(username => username && username !== bot.username);
+            if (candidates.length === 0) return;
+            const username = candidates[Math.floor(Math.random() * candidates.length)];
+            execute(this, agent, async () => {
+                const before = bot.entity.position.clone();
+                const sent = requestTpaToPlayer(bot, username);
+                if (!sent) return;
+                await new Promise(resolve => setTimeout(resolve, this.accept_wait));
+                let player = bot.players[username]?.entity;
+                let accepted = player && bot.entity.position.distanceTo(player.position) <= 12;
+                if (!accepted && bot.entity.position.distanceTo(before) < 10) {
+                    bot.chat(`${username} ơi, cho tui qua chơi với!`);
+                }
+                const followDeadline = Date.now() + 20000;
+                while (!accepted && Date.now() < followDeadline && !bot.interrupt_code) {
+                    await new Promise(resolve => setTimeout(resolve, 1000));
+                    player = bot.players[username]?.entity;
+                    accepted = player && bot.entity.position.distanceTo(player.position) <= 12;
+                }
+                if (accepted) {
+                    await skills.followPlayer(bot, username, 3);
+                }
+            });
         }
     },
     {

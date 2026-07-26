@@ -23,6 +23,7 @@
         "inventory_cleanup": true,
         "torch_placing": true,
         "elbow_room": true,
+        "idle_social_tpa": true,
         "idle_healing": true,
         "idle_staring": true,
         "cheat": false
