@@ -83,6 +83,7 @@ const modes_list = [
                 }
             }
             else if (Date.now() - bot.lastDamageTime < 3000 && (bot.health < 5 || bot.lastDamageTaken >= bot.health)) {
+                if (agent.actions.currentActionLabel === 'mode:self_defense' && bot.health > 3) return;
                 say(agent, 'I\'m dying!');
                 execute(this, agent, async () => {
                     await skills.moveAway(bot, 20);
@@ -186,6 +187,7 @@ const modes_list = [
                 return;
             }
 
+            if (agent.actions.currentActionLabel === 'mode:item_collecting') return;
             const { entity: enemy } = await observeProactiveThreat(agent.bot, {
                 maxDistance: 8,
             });

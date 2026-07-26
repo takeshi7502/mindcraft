@@ -100,11 +100,122 @@ async function equipHighestAttack(bot) {
     if (weapons.length === 0)
         weapons = bot.inventory.items().filter(item => item.name.includes('pickaxe') || item.name.includes('shovel'));
     if (weapons.length === 0)
-        return;
+        return null;
     weapons.sort((a, b) => b.attackDamage - a.attackDamage);
     let weapon = weapons[0];
     if (weapon)
         await bot.equip(weapon, 'hand');
+    return weapon;
+}
+
+function hasMeleeWeapon(bot) {
+    return bot.inventory.items().some(item => item.name.includes('sword') ||
+        (item.name.includes('axe') && !item.name.includes('pickaxe')) ||
+        item.name.includes('pickaxe') || item.name.includes('shovel'));
+}
+
+function getRangedWeapon(bot) {
+    const items = bot.inventory.items();
+    const bow = items.find(item => item.name === 'bow');
+    const crossbow = items.find(item => item.name === 'crossbow');
+    const arrows = items.find(item => item.name === 'arrow' || item.name.endsWith('_arrow'));
+    const fireworks = items.find(item => item.name === 'firework_rocket');
+    if (bow && arrows) return { weapon: bow, ammo: arrows, chargeMs: 950 };
+    if (crossbow && (arrows || fireworks)) return { weapon: crossbow, ammo: arrows ?? fireworks, chargeMs: 1250 };
+    return null;
+}
+
+function aimPointForShot(bot, entity) {
+    const distance = bot.entity.position.distanceTo(entity.position);
+    const height = entity.height ?? 1.8;
+    const arrowDropCompensation = Math.min(2.2, Math.max(0, (distance - 8) * 0.08));
+    return entity.position.offset(0, height * 0.65 + arrowDropCompensation, 0);
+}
+
+async function backpedalWhileAiming(bot, entity, milliseconds=550) {
+    const startedAt = Date.now();
+    bot.setControlState('back', true);
+    bot.setControlState('sprint', true);
+    try {
+        while (Date.now() - startedAt < milliseconds && !bot.interrupt_code && entity?.isValid !== false) {
+            await bot.lookAt(aimPointForShot(bot, entity), true);
+            await wait(bot, 80);
+        }
+    } finally {
+        bot.setControlState('back', false);
+        bot.setControlState('sprint', false);
+    }
+}
+
+async function keepRangedDistance(bot, entity, preferredDistance=12) {
+    if (!entity?.position) return false;
+    const distance = bot.entity.position.distanceTo(entity.position);
+    const movements = new pf.Movements(bot);
+    movements.canDig = false;
+    movements.canPlaceOn = false;
+    movements.canOpenDoors = false;
+    movements.allow1by1towers = false;
+    bot.pathfinder.setMovements(movements);
+    try {
+        if (distance < preferredDistance - 3) {
+            await backpedalWhileAiming(bot, entity, 550);
+        } else if (distance > preferredDistance + 8) {
+            const move = bot.pathfinder.goto(new pf.goals.GoalFollow(entity, preferredDistance + 2), true);
+            await Promise.race([
+                move,
+                wait(bot, 450),
+            ]);
+        }
+    } catch (err) {/* target may move, path may be stopped, or spacing may fail; still try shooting */}
+    return true;
+}
+
+export async function shootEntity(bot, entity, shots=1, { preferredDistance=12, maxDistance=28 } = {}) {
+    /** Shoot an entity with a bow/crossbow while keeping a safer ranged distance. */
+    if (!entity || entity.isValid === false || !entity.position) return false;
+    if (mc.isIgnoredMob(entity)) {
+        log(bot, `Refusing to shoot ignored mob ${entity?.name || 'unknown'}.`);
+        return false;
+    }
+    const ranged = getRangedWeapon(bot);
+    if (!ranged) {
+        log(bot, `No bow/crossbow ammo available.`);
+        return false;
+    }
+    const pausedModes = ['item_collecting', 'inventory_cleanup', 'torch_placing', 'elbow_room'];
+    for (const mode of pausedModes) {
+        if (bot.modes?.exists?.(mode)) bot.modes.pause(mode);
+    }
+    bot.pvp?.stop?.();
+    bot.pathfinder?.stop?.();
+    await bot.equip(ranged.weapon, 'hand');
+    let fired = 0;
+    const targetId = entity.id;
+    try {
+        for (let i = 0; i < shots; i++) {
+            if (bot.interrupt_code || entity.isValid === false) break;
+            if (bot.entities?.[targetId] !== entity && bot.entities?.[String(targetId)] !== entity) break;
+            const distance = bot.entity.position.distanceTo(entity.position);
+            if (distance > maxDistance) {
+                await keepRangedDistance(bot, entity, preferredDistance);
+                if (bot.entity.position.distanceTo(entity.position) > maxDistance) break;
+            } else {
+                await keepRangedDistance(bot, entity, preferredDistance);
+            }
+            await bot.lookAt(aimPointForShot(bot, entity), true);
+            bot.activateItem();
+            await wait(bot, Math.max(700, ranged.chargeMs));
+            bot.deactivateItem();
+            fired++;
+            await wait(bot, 180);
+        }
+    } finally {
+        for (const mode of pausedModes) {
+            if (bot.modes?.exists?.(mode)) bot.modes.unpause(mode);
+        }
+    }
+    if (fired > 0) log(bot, `Shot ${entity.username ?? entity.name} ${fired} time(s).`);
+    return fired > 0;
 }
 
 export async function craftRecipe(bot, itemName, num=1) {
@@ -424,7 +535,11 @@ export async function attackEntity(bot, entity, kill=true) {
     }
 
     let pos = entity.position;
-    await equipHighestAttack(bot)
+    const meleeWeapon = await equipHighestAttack(bot);
+    if (!meleeWeapon) {
+        const shots = kill ? 6 : 1;
+        return await shootEntity(bot, entity, shots);
+    }
 
     if (!kill) {
         if (bot.entity.position.distanceTo(pos) > 5) {
@@ -504,7 +619,13 @@ export async function defendSelf(bot, range=9, preferredEnemy=null) {
         }
     }
     while (enemy) {
-        await equipHighestAttack(bot);
+        const meleeWeapon = await equipHighestAttack(bot);
+        if (!meleeWeapon) {
+            attacked = await shootEntity(bot, enemy, 6, { preferredDistance: 12, maxDistance: 32 }) || attacked;
+            preferredEnemy = null;
+            enemy = world.getNearestEntityWhere(bot, entity => mc.isHostile(entity), range);
+            continue;
+        }
         if (bot.entity.position.distanceTo(enemy.position) >= 4 && enemy.name !== 'creeper' && enemy.name !== 'phantom') {
             try {
                 const movements = new pf.Movements(bot);
@@ -719,7 +840,12 @@ export async function pickupNearbyItems(bot, distance=8, settleMs=1200) {
         let movements = new pf.Movements(bot);
         movements.canDig = false;
         bot.pathfinder.setMovements(movements);
-        await goToGoal(bot, new pf.goals.GoalFollow(nearestItem, 1));
+        try {
+            await goToGoal(bot, new pf.goals.GoalFollow(nearestItem, 1));
+        } catch (err) {
+            log(bot, `Stopped picking up item: ${err.message ?? err}.`);
+            break;
+        }
         await new Promise(resolve => setTimeout(resolve, 200));
         let prev = nearestItem;
         nearestItem = getNearestItem(bot);

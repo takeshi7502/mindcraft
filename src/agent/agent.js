@@ -698,8 +698,7 @@ export class Agent {
             setTimeout(async () => {
                 if (bot !== this.bot || this._sameProcessRejoin) return;
                 if (this.isIdle()) {
-                    const resumedScheduledTask = await this.taskScheduler.resumePending();
-                    if (!resumedScheduledTask) this.actions.resumeAction();
+                    this.actions.resumeAction();
                 }
             }, 1000);
         });

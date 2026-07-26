@@ -13,6 +13,7 @@ import { acquireMaterials } from '../library/material_acquisition.js';
 import { FailureReason, taskResult } from '../library/task_primitives.js';
 import { acceptTpa, requestTpaToPlayer } from '../library/teleport_requests.js';
 import { cleanupInventory } from '../library/inventory_cleanup.js';
+import { clearAttacker, clearPlayerCombatState } from '../library/combat_targeting.js';
 
 const commandContext = new AsyncLocalStorage();
 
@@ -157,9 +158,18 @@ export const actionsList = [
         description: 'Force stop all actions and commands that are currently executing.',
         perform: async function (agent) {
             await agent.taskScheduler?.emergencyStop('emergency_stop');
+            agent.bot?.pvp?.stop?.();
+            agent.bot?.pathfinder?.stop?.();
+            clearAttacker(agent.bot);
+            clearPlayerCombatState(agent.bot);
+            agent.bot.retaliationTarget = null;
+            agent.bot.lastDamageTime = 0;
+            agent.bot.lastDamageTaken = 0;
             await agent.actions.stop();
             agent.clearBotLogs();
             agent.actions.cancelResume();
+            agent.bot.clearControlStates();
+            agent.bot.modes?.unPauseAll?.();
             agent.bot.emit('idle');
             let msg = 'Agent stopped.';
             if (agent.self_prompter.isActive())
@@ -429,6 +439,27 @@ export const actionsList = [
             const result = await cleanupInventory(agent.bot);
             skills.log(agent.bot, `Inventory cleanup: deposited=${result.deposited}, discarded=${result.discarded}. ${result.message ?? ''}`);
         })
+    },
+    {
+        name: '!shootNearest',
+        description: 'Shoot the nearest mob/player of the given type with a bow or crossbow, even if melee weapons are available. Use when the user explicitly asks to use a bow/crossbow or to shoot something.',
+        params: {
+            'target_type': { type: 'string', description: 'Entity name/type to shoot, such as skeleton, zombie, player name, or player.' },
+            'shots': { type: 'int', description: 'Number of shots to fire.', domain: [1, 64] }
+        },
+        perform: runAsAction(async (agent, target_type, shots) => {
+            const normalized = target_type.toLowerCase();
+            const target = agent.bot.nearestEntity(entity => {
+                if (!entity?.position || entity.isValid === false) return false;
+                if (normalized === 'player') return entity.type === 'player' && entity.username !== agent.bot.username;
+                return entity.name === normalized || entity.username?.toLowerCase() === normalized;
+            });
+            if (!target) {
+                skills.log(agent.bot, `Could not find ${target_type} to shoot.`);
+                return false;
+            }
+            return await skills.shootEntity(agent.bot, target, shots, { preferredDistance: 12, maxDistance: 32 });
+        }, false, 3)
     },
     {
         name: '!followPlayer',
