@@ -147,6 +147,22 @@ export async function equipIdleLoadout(bot) {
     await equipOffhand(bot);
 }
 
+// Cheap check (no equip): does the current loadout differ from the desired one?
+// Used by the idle_equip mode so it only runs an action when something actually changes.
+export function needsLoadoutChange(bot) {
+    const desiredWeapon = pickBestMeleeWeapon(bot);
+    if (desiredWeapon && bot.heldItem?.name !== desiredWeapon.name) return true;
+    const items = bot.inventory.items();
+    const desiredOff = ['shield', 'totem_of_undying']
+        .map(name => items.find(i => i.name === name)).find(Boolean);
+    if (desiredOff) {
+        const offhandSlot = bot.getEquipmentDestSlot?.('off-hand');
+        const current = offhandSlot != null ? bot.inventory.slots[offhandSlot] : null;
+        if (current?.name !== desiredOff.name) return true;
+    }
+    return false;
+}
+
 function hasMeleeWeapon(bot) {
     return bot.inventory.items().some(item => item.name.includes('sword') ||
         (item.name.includes('axe') && !item.name.includes('pickaxe')) ||
@@ -1604,9 +1620,11 @@ export async function goToPosition(bot, x, y, z, min_distance=2) {
     
     const progressInterval = setInterval(checkDigProgress, 1000);
     
+    bot.isTraveling = true;
     try {
         await goToGoal(bot, new pf.goals.GoalNear(x, y, z, min_distance));
         clearInterval(progressInterval);
+        bot.isTraveling = false;
         const distance = bot.entity.position.distanceTo(new Vec3(x, y, z));
         if (distance <= min_distance+1) {
             log(bot, `You have reached at ${x}, ${y}, ${z}.`);
@@ -1620,6 +1638,8 @@ export async function goToPosition(bot, x, y, z, min_distance=2) {
         log(bot, `Pathfinding stopped: ${err.message}.`);
         clearInterval(progressInterval);
         return false;
+    } finally {
+        bot.isTraveling = false;
     }
 }
 
@@ -1757,7 +1777,12 @@ export async function goToPlayer(bot, username, distance=3) {
     distance = Math.max(distance, 0.5);
     const goal = new pf.goals.GoalFollow(player, distance);
 
-    await goToGoal(bot, goal, true);
+    bot.isTraveling = true;
+    try {
+        await goToGoal(bot, goal, true);
+    } finally {
+        bot.isTraveling = false;
+    }
 
     log(bot, `You have reached ${username}.`);
 }

@@ -152,6 +152,8 @@ const modes_list = [
         on: true,
         active: false,
         update: async function (agent) {
+            // While actively traveling to a destination, don't flee; just push through.
+            if (agent.bot.isTraveling) return;
             const { entity: enemy } = await observeProactiveThreat(agent.bot, {
                 maxDistance: 16,
             });
@@ -196,6 +198,8 @@ const modes_list = [
             }
 
             if (agent.actions.currentActionLabel === 'mode:item_collecting') return;
+            // While traveling, ignore mobs we haven't been hit by: avoid and keep going.
+            if (agent.bot.isTraveling) return;
             const { entity: enemy } = await observeProactiveThreat(agent.bot, {
                 maxDistance: 8,
             });
@@ -381,12 +385,14 @@ const modes_list = [
         interrupts: [],
         on: true,
         active: false,
-        cooldown: 5,
+        cooldown: 10,
         last_equip: 0,
         update: async function (agent) {
             if (!agent.isIdle()) return;
             if (Date.now() - this.last_equip < this.cooldown * 1000) return;
             this.last_equip = Date.now();
+            // Only run an action when the loadout actually needs changing (avoids log spam).
+            if (!skills.needsLoadoutChange(agent.bot)) return;
             execute(this, agent, async () => {
                 await skills.equipIdleLoadout(agent.bot);
             });

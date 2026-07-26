@@ -544,7 +544,7 @@ export const actionsList = [
         },
         perform: runAsAction(async (agent, x, y, z, closeness) => {
             await skills.goToPosition(agent.bot, x, y, z, closeness);
-        })
+        }, true)
     },
     {
         name: '!searchForBlock',
