@@ -209,6 +209,63 @@
             text-overflow: ellipsis;
             white-space: nowrap;
         }
+        /* Under-icon durability bar (quick glance, no hover) */
+        .dura-badge {
+            width: 30px;
+            height: 4px;
+            border-radius: 2px;
+            background: #000;
+            overflow: hidden;
+            margin-top: -2px;
+        }
+        .dura-badge .dura-fill {
+            height: 100%;
+            border-radius: 2px;
+            transition: width 0.3s ease;
+        }
+        .item-detailed { cursor: help; }
+        /* Minecraft-style floating tooltip */
+        #mc-tooltip {
+            position: fixed;
+            z-index: 9999;
+            pointer-events: none;
+            display: none;
+            min-width: 160px;
+            max-width: 320px;
+            padding: 10px 12px;
+            background: rgba(18, 12, 28, 0.96);
+            border: 1px solid transparent;
+            border-radius: 8px;
+            border-image: linear-gradient(135deg, #a855f7, #6d28d9) 1;
+            box-shadow: 0 8px 28px rgba(0,0,0,0.55), 0 0 0 1px rgba(168,85,247,0.25);
+            backdrop-filter: blur(6px);
+            font-size: 0.85em;
+            line-height: 1.45;
+            color: #e8e0f5;
+        }
+        #mc-tooltip .tt-title {
+            font-weight: 700;
+            font-size: 1.02em;
+            margin-bottom: 4px;
+            color: #ffffff;
+        }
+        #mc-tooltip .tt-title.custom { color: #d8b4fe; font-style: italic; }
+        #mc-tooltip .tt-sub { color: #8a8497; font-size: 0.9em; margin-bottom: 6px; }
+        #mc-tooltip .ench-line { color: #a9c7ff; }
+        #mc-tooltip .stored-line { color: #c4a9ff; }
+        #mc-tooltip .potion-line { color: #ff9ec4; }
+        #mc-tooltip .lore-line { color: #9a94a8; font-style: italic; }
+        #mc-tooltip .dura-row { display: flex; align-items: center; gap: 8px; margin: 6px 0 2px; }
+        #mc-tooltip .dura-bar {
+            flex: 1;
+            height: 7px;
+            background: #000;
+            border-radius: 4px;
+            overflow: hidden;
+            border: 1px solid #333;
+        }
+        #mc-tooltip .dura-bar .dura-fill { height: 100%; border-radius: 4px; }
+        #mc-tooltip .dura-text { font-size: 0.85em; color: #cfc8dc; white-space: nowrap; }
         /* Armor icons */
         .armor-grid {
             display: flex;
@@ -507,6 +564,99 @@
             return `<div class="armor-slot empty" title="${label}: none"><span class="armor-placeholder">-</span></div>`;
         }
 
+        // ---- Rich item tooltip (in-game-like) ----
+        function durabilityColor(pct) {
+            // green (120) -> red (0) hue based on remaining percentage
+            const hue = Math.max(0, Math.min(120, Math.round(pct * 1.2)));
+            return `hsl(${hue}, 80%, 45%)`;
+        }
+        function romanNumeral(n) {
+            const map = [[10,'X'],[9,'IX'],[5,'V'],[4,'IV'],[1,'I']];
+            if (!n || n < 1 || n > 30) return String(n ?? '');
+            let out = '';
+            for (const [v, s] of map) { while (n >= v) { out += s; n -= v; } }
+            return out;
+        }
+        function itemDetailHTML(d) {
+            if (!d) return '';
+            let html = '';
+            const titleClass = d.customName ? 'tt-title custom' : 'tt-title';
+            const titleText = d.customName || prettyItemName(d.displayName || d.name);
+            html += `<div class="${titleClass}">${escapeHTML(titleText)}</div>`;
+            if (d.customName) html += `<div class="tt-sub">${escapeHTML(prettyItemName(d.displayName || d.name))}</div>`;
+            if (d.durability) {
+                const pct = Math.round(d.durability.current / d.durability.max * 100);
+                html += `<div class="dura-row">
+                    <div class="dura-bar"><div class="dura-fill" style="width:${pct}%;background:${durabilityColor(pct)}"></div></div>
+                    <div class="dura-text">${d.durability.current} / ${d.durability.max}</div>
+                </div>`;
+            }
+            for (const e of (d.enchants || [])) {
+                html += `<div class="ench-line">${escapeHTML(e.displayName)} ${romanNumeral(e.level)}</div>`;
+            }
+            for (const e of (d.storedEnchants || [])) {
+                html += `<div class="stored-line">${escapeHTML(e.displayName)} ${romanNumeral(e.level)}</div>`;
+            }
+            if (d.potion) {
+                html += `<div class="potion-line">Potion of ${escapeHTML(prettyItemName(d.potion))}</div>`;
+            }
+            for (const l of (d.lore || [])) {
+                html += `<div class="lore-line">${escapeHTML(l)}</div>`;
+            }
+            return html;
+        }
+        function escapeHTML(s) {
+            return String(s ?? '').replace(/[&<>"']/g, c => (
+                { '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
+        }
+        // Single shared tooltip element
+        let _mcTooltip = null;
+        function getTooltipEl() {
+            if (!_mcTooltip) {
+                _mcTooltip = document.createElement('div');
+                _mcTooltip.id = 'mc-tooltip';
+                document.body.appendChild(_mcTooltip);
+            }
+            return _mcTooltip;
+        }
+        function showItemTooltip(evt, detailJson) {
+            let d; try { d = JSON.parse(decodeURIComponent(detailJson)); } catch (e) { return; }
+            if (!d) return;
+            const html = itemDetailHTML(d);
+            if (!html) return;
+            const tt = getTooltipEl();
+            tt.innerHTML = html;
+            tt.style.display = 'block';
+            moveItemTooltip(evt);
+        }
+        function moveItemTooltip(evt) {
+            const tt = getTooltipEl();
+            if (tt.style.display !== 'block') return;
+            const pad = 14;
+            let x = evt.clientX + pad;
+            let y = evt.clientY + pad;
+            const rect = tt.getBoundingClientRect();
+            if (x + rect.width > window.innerWidth) x = evt.clientX - rect.width - pad;
+            if (y + rect.height > window.innerHeight) y = evt.clientY - rect.height - pad;
+            tt.style.left = Math.max(4, x) + 'px';
+            tt.style.top = Math.max(4, y) + 'px';
+        }
+        function hideItemTooltip() {
+            if (_mcTooltip) _mcTooltip.style.display = 'none';
+        }
+        // Build the interactive attributes + optional durability badge for an item with details.
+        function itemInteractiveAttrs(detail) {
+            if (!detail) return { attrs: '', badge: '' };
+            const json = encodeURIComponent(JSON.stringify(detail));
+            const attrs = ` class="item-detailed" onmousemove="showItemTooltip(event, '${json}')" onmouseleave="hideItemTooltip()"`;
+            let badge = '';
+            if (detail.durability) {
+                const pct = Math.round(detail.durability.current / detail.durability.max * 100);
+                badge = `<div class="dura-badge"><div class="dura-fill" style="width:${pct}%;background:${durabilityColor(pct)}"></div></div>`;
+            }
+            return { attrs, badge };
+        }
+
         const statusEl = document.getElementById('msStatus');
         function updateStatus(connected) {
             if (!statusEl) return;
@@ -697,18 +847,31 @@
                     }
                     if (equippedEl && st.inventory?.equipment) {
                         const e = st.inventory.equipment;
-                        equippedEl.textContent = `equipped: ${e.mainHand || 'none'}`;
+                        const off = e.offHand ? ` | off: ${prettyItemName(e.offHand)}` : '';
+                        equippedEl.textContent = `equipped: ${e.mainHand ? prettyItemName(e.mainHand) : 'none'}${off}`;
                     }
                     const armorEl = document.getElementById(`armor-${name}`);
                     if (armorEl && st.inventory?.equipment) {
                         const e = st.inventory.equipment;
+                        // Render one equipped slot with icon + hover tooltip (durability/enchants) + badge.
+                        const slotHTML = (itemName, detail, label) => {
+                            if (!itemName) return emptySlotHTML(label);
+                            const cands = buildIconUrlCandidates(itemName, name);
+                            const { attrs, badge } = itemInteractiveAttrs(detail);
+                            const fallbackTitle = `${label}: ${prettyItemName(itemName)}`;
+                            const titleAttr = detail ? '' : ` title="${fallbackTitle}"`;
+                            return `<div class="armor-slot"${attrs}${titleAttr}>
+                                <img class="inv-img" src="${cands[0]}" data-url-index="0" data-url-list="${cands.join('||')}" onerror="fallbackItemIcon(this)" alt="${fallbackTitle}">
+                                ${badge}
+                            </div>`;
+                        };
                         const parts = [];
-                        parts.push(e.helmet ? iconHTMLForItem(e.helmet, `head: ${prettyItemName(e.helmet)}`, name) : emptySlotHTML('head'));
-                        parts.push(e.chestplate ? iconHTMLForItem(e.chestplate, `chest: ${prettyItemName(e.chestplate)}`, name) : emptySlotHTML('chest'));
-                        parts.push(e.leggings ? iconHTMLForItem(e.leggings, `legs: ${prettyItemName(e.leggings)}`, name) : emptySlotHTML('legs'));
-                        parts.push(e.boots ? iconHTMLForItem(e.boots, `feet: ${prettyItemName(e.boots)}`, name) : emptySlotHTML('feet'));
-                        // Main hand for quick glance
-                        parts.push(e.mainHand ? iconHTMLForItem(e.mainHand, `main hand: ${prettyItemName(e.mainHand)}`, name) : emptySlotHTML('main hand'));
+                        parts.push(slotHTML(e.helmet, e.helmetDetail, 'head'));
+                        parts.push(slotHTML(e.chestplate, e.chestplateDetail, 'chest'));
+                        parts.push(slotHTML(e.leggings, e.leggingsDetail, 'legs'));
+                        parts.push(slotHTML(e.boots, e.bootsDetail, 'feet'));
+                        parts.push(slotHTML(e.mainHand, e.mainHandDetail, 'main hand'));
+                        parts.push(slotHTML(e.offHand, e.offHandDetail, 'off hand'));
                         armorEl.innerHTML = `<div class="armor-grid">${parts.join('')}</div>`;
                     }
                     if (actionEl && st.action) {
@@ -719,20 +882,33 @@
                     if (invGrid && st.inventory?.counts) {
                         const counts = st.inventory.counts;
                         const entries = Object.entries(counts);
+                        // Index detailed items by name; a name may have several variants (differing
+                        // durability/enchants), so keep an array per name and consume in order.
+                        const detailByName = {};
+                        for (const it of (st.inventory.items || [])) {
+                            if (!it) continue;
+                            (detailByName[it.name] = detailByName[it.name] || []).push(it);
+                        }
                         if (entries.length) {
                             invGrid.classList.remove('empty');
                             invGrid.innerHTML = entries
                                 .sort((a, b) => a[0].localeCompare(b[0]))
                                 .map(([k, v]) => {
                                     const title = prettyItemName(k);
-                                    const safeAttr = k.replace(/'/g, "\\'");
                                     const iconCandidates = buildIconUrlCandidates(k, name);
                                     const icon = iconCandidates[0];
+                                    // Pick a representative detailed stack (prefer one that actually has extra info).
+                                    const variants = detailByName[k] || [];
+                                    const rich = variants.find(d => d && (d.durability || d.enchants?.length || d.storedEnchants?.length || d.potion || d.customName || d.lore?.length));
+                                    const detail = rich || variants[0] || null;
+                                    const { attrs, badge } = itemInteractiveAttrs(detail);
+                                    const displayTitle = detail && detail.customName ? escapeHTML(detail.customName) : title;
                                     return `
-                                        <div class="inv-item" title="${title}">
+                                        <div class="inv-item"${attrs}>
                                             <img class="inv-img" src="${icon}" data-url-index="0" data-url-list="${iconCandidates.join('||')}" onerror="fallbackItemIcon(this)" alt="${title}">
+                                            ${badge}
                                             <div class="inv-count">${v}</div>
-                                            <div class="inv-name">${title}</div>
+                                            <div class="inv-name">${displayTitle}</div>
                                         </div>
                                     `;
                                 })
