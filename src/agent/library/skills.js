@@ -95,17 +95,56 @@ async function autoLight(bot) {
     return false;
 }
 
+// Main-hand melee weapon preference, by type, from best to worst.
+// Within each type the strongest material (by attackDamage) is chosen.
+function pickBestMeleeWeapon(bot) {
+    const items = bot.inventory.items();
+    const matchers = [
+        item => item.name.includes('sword'),                                   // kiếm
+        item => item.name.includes('axe') && !item.name.includes('pickaxe'),   // rìu
+        item => item.name.includes('trident'),                                 // giáo
+        item => item.name.includes('mace'),                                    // chuỳ
+        // fallback: dụng cụ dùng tạm khi không có vũ khí thật
+        item => item.name.includes('pickaxe'),                                 // cuốc chim
+        item => item.name.includes('shovel'),                                  // xẻng
+        item => item.name.includes('hoe'),                                     // cuốc
+    ];
+    for (const match of matchers) {
+        const candidates = items.filter(match);
+        if (candidates.length > 0) {
+            candidates.sort((a, b) => (b.attackDamage ?? 0) - (a.attackDamage ?? 0));
+            return candidates[0];
+        }
+    }
+    return null;
+}
+
 async function equipHighestAttack(bot) {
-    let weapons = bot.inventory.items().filter(item => item.name.includes('sword') || (item.name.includes('axe') && !item.name.includes('pickaxe')));
-    if (weapons.length === 0)
-        weapons = bot.inventory.items().filter(item => item.name.includes('pickaxe') || item.name.includes('shovel'));
-    if (weapons.length === 0)
-        return null;
-    weapons.sort((a, b) => b.attackDamage - a.attackDamage);
-    let weapon = weapons[0];
-    if (weapon)
+    const weapon = pickBestMeleeWeapon(bot);
+    if (weapon && bot.heldItem?.name !== weapon.name)
         await bot.equip(weapon, 'hand');
     return weapon;
+}
+
+// Off-hand preference: shield > totem of undying.
+async function equipOffhand(bot) {
+    const items = bot.inventory.items();
+    const priority = ['shield', 'totem_of_undying'];
+    const item = priority.map(name => items.find(i => i.name === name)).find(Boolean);
+    if (!item) return null;
+    const offhandSlot = bot.getEquipmentDestSlot?.('off-hand');
+    const current = offhandSlot != null ? bot.inventory.slots[offhandSlot] : null;
+    if (current?.name === item.name) return item; // already equipped, avoid spam
+    try {
+        await bot.equip(item, 'off-hand');
+    } catch (err) {/* off-hand may be unsupported on some servers */}
+    return item;
+}
+
+// Idle loadout: keep a melee weapon in the main hand and a shield in the off-hand.
+export async function equipIdleLoadout(bot) {
+    await equipHighestAttack(bot);
+    await equipOffhand(bot);
 }
 
 function hasMeleeWeapon(bot) {

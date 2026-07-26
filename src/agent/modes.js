@@ -169,15 +169,22 @@ const modes_list = [
         interrupts: ['all'],
         on: true,
         active: false,
+        last_retaliation_id: null,
         update: async function (agent) {
             const attacker = getRecentAttacker(agent.bot);
             if (attacker) {
-                say(agent, `Retaliating against ${attacker.username ?? attacker.name}!`);
+                const attackerId = attacker.id ?? attacker.username ?? attacker.name;
+                // Only announce once per attacker to avoid spamming the message every tick.
+                if (this.last_retaliation_id !== attackerId) {
+                    this.last_retaliation_id = attackerId;
+                    say(agent, `Retaliating against ${attacker.username ?? attacker.name}!`);
+                }
                 execute(this, agent, async () => {
                     await skills.defendSelf(agent.bot, 8, attacker);
                 });
                 return;
             }
+            this.last_retaliation_id = null;
 
             const warningTarget = consumeWarningStrike(agent.bot);
             if (warningTarget) {
@@ -365,6 +372,23 @@ const modes_list = [
             execute(this, agent, async () => {
                 const ate = await skills.eatForHealing(agent.bot);
                 if (ate) say(agent, 'Eating to recover.');
+            });
+        }
+    },
+    {
+        name: 'idle_equip',
+        description: 'While idle, keep a melee weapon in the main hand and a shield in the off-hand.',
+        interrupts: [],
+        on: true,
+        active: false,
+        cooldown: 5,
+        last_equip: 0,
+        update: async function (agent) {
+            if (!agent.isIdle()) return;
+            if (Date.now() - this.last_equip < this.cooldown * 1000) return;
+            this.last_equip = Date.now();
+            execute(this, agent, async () => {
+                await skills.equipIdleLoadout(agent.bot);
             });
         }
     },

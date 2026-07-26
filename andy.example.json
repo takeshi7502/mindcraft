@@ -1,0 +1,8 @@
+{
+    "name": "waku",
+    "model": {
+        "api": "9router",
+        "model": "ab/deepseek-v4-flash",
+        "url": "http://localhost:20128/v1"
+    }
+}
