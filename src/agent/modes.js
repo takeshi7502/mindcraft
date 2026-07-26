@@ -309,6 +309,25 @@ const modes_list = [
         }
     },
     {
+        name: 'idle_healing',
+        description: 'Eat food while idle to restore hunger/saturation and naturally heal to full health.',
+        interrupts: [],
+        on: true,
+        active: false,
+        cooldown: 5,
+        last_eat: 0,
+        update: async function (agent) {
+            if (!agent.isIdle()) return;
+            if (Date.now() - this.last_eat < this.cooldown * 1000) return;
+            if (agent.bot.health >= 20 && agent.bot.food >= 20) return;
+            this.last_eat = Date.now();
+            execute(this, agent, async () => {
+                const ate = await skills.eatForHealing(agent.bot);
+                if (ate) say(agent, 'Eating to recover.');
+            });
+        }
+    },
+    {
         name: 'idle_staring',
         description: 'Animation to look around at entities when idle.',
         interrupts: [],

@@ -613,7 +613,8 @@ export async function defendSelf(bot, range=9, preferredEnemy=null) {
     if (preferredEnemy && enemy) {
         const distance = bot.entity.position.distanceTo(enemy.position);
         const verticalDifference = Math.abs(bot.entity.position.y - enemy.position.y);
-        if (distance > 48 || verticalDifference > 12 || !await world.isClearPath(bot, enemy)) {
+        const hasRanged = Boolean(getRangedWeapon(bot));
+        if (distance > 48 || verticalDifference > 18 || (!hasRanged && !await world.isClearPath(bot, enemy))) {
             log(bot, `Stopping retaliation: attacker is no longer safely reachable.`);
             return false;
         }
@@ -651,12 +652,27 @@ export async function defendSelf(bot, range=9, preferredEnemy=null) {
         bot.pvp.attack(enemy);
         attacked = true;
         if (preferredEnemy === enemy) {
-            const pursuitDeadline = Date.now() + 30000;
+            const pursuitDeadline = Date.now() + 10000;
             const preferredId = enemy.id;
+            let switchedToRanged = false;
             while (Date.now() < pursuitDeadline && !bot.interrupt_code &&
                 enemy.isValid !== false &&
                 (bot.entities?.[preferredId] === enemy || bot.entities?.[String(preferredId)] === enemy)) {
+                const distance = bot.entity.position.distanceTo(enemy.position);
+                const verticalDifference = Math.abs(bot.entity.position.y - enemy.position.y);
+                if (distance <= 4 && verticalDifference <= 3) break;
+                if ((distance > 6 || verticalDifference > 4 || !await world.isClearPath(bot, enemy)) && getRangedWeapon(bot)) {
+                    bot.pvp.stop();
+                    switchedToRanged = await shootEntity(bot, enemy, 6, { preferredDistance: 12, maxDistance: 40 });
+                    attacked = switchedToRanged || attacked;
+                    break;
+                }
                 await new Promise(resolve => setTimeout(resolve, 250));
+            }
+            if (!switchedToRanged && Date.now() >= pursuitDeadline && enemy.isValid !== false) {
+                bot.pvp.stop();
+                log(bot, `Giving up retaliation: could not reach ${enemy.username ?? enemy.name} within 10 seconds.`);
+                return attacked;
             }
         } else {
             await new Promise(resolve => setTimeout(resolve, 500));
@@ -1298,6 +1314,34 @@ export async function consume(bot, itemName="") {
     await bot.consume();
     log(bot, `Consumed ${item.name}.`);
     return true;
+}
+
+export async function eatForHealing(bot) {
+    /** Eat available food while idle to restore hunger/saturation for health regeneration. */
+    if (bot.health >= 20 && bot.food >= 20) return false;
+    if (bot.food >= 20 && bot.health < 20) {
+        log(bot, `Health is not full, but hunger is already full; waiting for natural regeneration.`);
+        return false;
+    }
+    const foodPriority = [
+        'golden_apple', 'cooked_beef', 'cooked_porkchop', 'cooked_mutton', 'cooked_salmon',
+        'cooked_chicken', 'cooked_cod', 'bread', 'baked_potato', 'apple', 'carrot',
+        'potato', 'beef', 'porkchop', 'mutton', 'chicken', 'salmon', 'cod', 'sweet_berries',
+        'melon_slice', 'cookie'
+    ];
+    const inventory = bot.inventory.items();
+    const food = foodPriority.map(name => inventory.find(item => item.name === name)).find(Boolean) ||
+        inventory.find(item => item.foodPoints || item.name.includes('cooked_'));
+    if (!food) return false;
+    try {
+        await bot.equip(food, 'hand');
+        await bot.consume();
+        log(bot, `Ate ${food.name} to recover while idle.`);
+        return true;
+    } catch (err) {
+        log(bot, `Could not eat ${food.name}: ${err.message ?? err}.`);
+        return false;
+    }
 }
 
 
