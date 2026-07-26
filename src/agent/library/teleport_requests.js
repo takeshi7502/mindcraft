@@ -1,14 +1,15 @@
 const TPA_REQUEST_PATTERNS = [
     /(?:has requested|wants) to teleport to you/i,
     /type\s+\/tpaccept/i,
-    /teleport request (?:from|by)\s+([A-Za-z0-9_]{1,16})/i,
-    /([A-Za-z0-9_]{1,16})\s+(?:has requested|wants).*teleport/i,
+    /teleport request (?:from|by)\s+(\.?[A-Za-z0-9_]{1,16})/i,
+    /(\.?[A-Za-z0-9_]{1,16})\s+(?:has requested|wants).*teleport/i,
+    /(\.?[A-Za-z0-9_]{1,16}).*(?:teleport|tpa|tpaccept).*you/i,
 ];
 const PLAYER_NAME = /^\.?[A-Za-z0-9_]{1,16}$/;
 const ACCEPT_COOLDOWN_MS = 3000;
 const DIRECT_TPA_KEYWORDS = /(?:^|\s)(?:tp|tpa|teleport)(?:\s|$)/i;
-const DIRECT_TPA_SELF_TARGET = /(?:tôi|toi|me|here|đây|day)/i;
-const DIRECT_TPA_NAMED_TARGET = /(?:đến|toi|tới|to)\s+(\.?[A-Za-z0-9_]{1,16})/i;
+const DIRECT_TPA_SELF_TARGET = /(?:t\u00f4i|toi|me|here|\u0111\u00e2y|day)/i;
+const DIRECT_TPA_NAMED_TARGET = /(?:\u0111\u1ebfn|toi|t\u1edbi|to)\s+(\.?[A-Za-z0-9_]{1,16})/i;
 
 function normalizePlayerName(bot, playerName) {
     const raw = String(playerName ?? '').trim();
