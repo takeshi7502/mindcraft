@@ -621,9 +621,14 @@ export class Agent {
             bot.emit('midnight');
         });
 
+        // Only greet players who join AFTER the bot has settled in, so it does not
+        // spam-greet everyone already online when it first logs in or reconnects.
+        bot._greetReadyAt = Date.now() + 8000;
+        bot.on('spawn', () => { bot._greetReadyAt = Date.now() + 8000; });
         bot.on('playerJoined', (player) => {
             const username = player?.username;
             if (!username || username === bot.username) return;
+            if (!bot._greetReadyAt || Date.now() < bot._greetReadyAt) return;
             bot.chat(`Chào ${username} béo nha!`);
         });
 
