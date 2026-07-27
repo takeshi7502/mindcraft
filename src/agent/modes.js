@@ -322,22 +322,22 @@ const modes_list = [
     },
     {
         name: 'idle_social_tpa',
-        description: 'When idle for a while, randomly TPA to an online player and follow them if accepted.',
+        description: 'When no human has interacted for a while, TPA once to the last interacting online player.',
         interrupts: [],
         on: true,
         active: false,
         interval: 10 * 60 * 1000,
         accept_wait: 5000,
-        last_tpa: Date.now(),
         update: async function (agent) {
             if (!agent.isIdle()) return;
-            if (Date.now() - this.last_tpa < this.interval) return;
-            this.last_tpa = Date.now();
+            if (agent.idleTpaSent) return;
+            if (!agent.lastHumanUser) return;
+            if (Date.now() - agent.lastHumanInteractionAt < this.interval) return;
             const bot = agent.bot;
-            const candidates = Object.keys(bot.players ?? {})
-                .filter(username => username && username !== bot.username);
-            if (candidates.length === 0) return;
-            const username = candidates[Math.floor(Math.random() * candidates.length)];
+            const username = agent.lastHumanUser;
+            if (!bot.players?.[username]) return;
+
+            agent.idleTpaSent = true; // set before execute to avoid 300ms loop spam
             execute(this, agent, async () => {
                 const before = bot.entity.position.clone();
                 const sent = requestTpaToPlayer(bot, username);
@@ -362,7 +362,7 @@ const modes_list = [
     },
     {
         name: 'idle_healing',
-        description: 'Eat food while idle to restore hunger/saturation and naturally heal to full health.',
+        description: 'Eat while idle only until 8 hearts, with a low-hunger safety fallback.',
         interrupts: [],
         on: true,
         active: false,
@@ -371,11 +371,18 @@ const modes_list = [
         update: async function (agent) {
             if (!agent.isIdle()) return;
             if (Date.now() - this.last_eat < this.cooldown * 1000) return;
-            if (agent.bot.health >= 20 && agent.bot.food >= 20) return;
+            const needsHealingFood = agent.bot.health < 16 && agent.bot.food < 18;
+            const needsSafetyFood = agent.bot.food < 8;
+            if (!needsHealingFood && !needsSafetyFood) return;
             this.last_eat = Date.now();
             execute(this, agent, async () => {
-                const ate = await skills.eatForHealing(agent.bot);
-                if (ate) say(agent, 'Eating to recover.');
+                const ate = await skills.eatForHealing(agent.bot, {
+                    healthTarget: 16,
+                    regenHungerTarget: 18,
+                    lowHungerStart: 8,
+                    hungerTarget: 12,
+                });
+                if (ate) say(agent, 'Eating to recover safely.');
             });
         }
     },
@@ -396,6 +403,53 @@ const modes_list = [
             execute(this, agent, async () => {
                 await skills.equipIdleLoadout(agent.bot);
             });
+        }
+    },
+    {
+        name: 'social_greeting',
+        description: 'When idle, approach nearby human players and greet them once in a while.',
+        interrupts: [],
+        on: true,
+        active: false,
+        range: 16,
+        approach_distance: 3,
+        greet_distance: 4,
+        cooldown: 10 * 60 * 1000,
+        greeted_at: {},
+        update: async function (agent) {
+            if (!agent.isIdle()) return;
+            if (agent.self_prompter.isActive()) return;
+            if (convoManager.inConversation()) return;
+            const now = Date.now();
+            const player = world.getNearestEntityWhere(agent.bot, entity =>
+                entity.type === 'player' &&
+                entity.username &&
+                entity.username !== agent.name &&
+                !convoManager.isOtherAgent(entity.username),
+                this.range
+            );
+            if (!player) return;
+            const username = player.username;
+            if (now - (this.greeted_at[username] || 0) < this.cooldown) return;
+            this.greeted_at[username] = now;
+            execute(this, agent, async () => {
+                const current = agent.bot.players[username]?.entity;
+                if (!current) return;
+                const dist = current.position.distanceTo(agent.bot.entity.position);
+                if (dist > this.greet_distance) {
+                    const cheatWasOn = agent.bot.modes.isOn('cheat');
+                    if (cheatWasOn) agent.bot.modes.setOn('cheat', false);
+                    try {
+                        await skills.goToPlayer(agent.bot, username, this.approach_distance);
+                    } finally {
+                        if (cheatWasOn) agent.bot.modes.setOn('cheat', true);
+                    }
+                }
+                const stillThere = agent.bot.players[username]?.entity;
+                if (stillThere && stillThere.position.distanceTo(agent.bot.entity.position) <= this.range) {
+                    await say(agent, `Hi ${username}! Need anything?`);
+                }
+            }, 30);
         }
     },
     {

@@ -1371,15 +1371,22 @@ export async function consume(bot, itemName="") {
     return true;
 }
 
-export async function eatForHealing(bot) {
-    /** Eat available food while idle to restore hunger/saturation for health regeneration. */
-    if (bot.health >= 20 && bot.food >= 20) return false;
-    if (bot.food >= 20 && bot.health < 20) {
-        log(bot, `Health is not full, but hunger is already full; waiting for natural regeneration.`);
-        return false;
-    }
+export async function eatForHealing(bot, {
+    healthTarget = 16,      // 8 hearts
+    regenHungerTarget = 18, // enough for natural regeneration
+    lowHungerStart = 8,
+    hungerTarget = 12,
+} = {}) {
+    /** Eat available food while idle, but stop after reaching safe health/hunger targets. */
+    const needsHealingFood = bot.health < healthTarget && bot.food < regenHungerTarget;
+    const needsSafetyFood = bot.food < lowHungerStart;
+    if (!needsHealingFood && !needsSafetyFood) return false;
+
+    const targetFood = needsHealingFood ? regenHungerTarget : hungerTarget;
+    if (bot.food >= targetFood) return false;
+
     const foodPriority = [
-        'golden_apple', 'cooked_beef', 'cooked_porkchop', 'cooked_mutton', 'cooked_salmon',
+        'cooked_beef', 'cooked_porkchop', 'cooked_mutton', 'cooked_salmon',
         'cooked_chicken', 'cooked_cod', 'bread', 'baked_potato', 'apple', 'carrot',
         'potato', 'beef', 'porkchop', 'mutton', 'chicken', 'salmon', 'cod', 'sweet_berries',
         'melon_slice', 'cookie'

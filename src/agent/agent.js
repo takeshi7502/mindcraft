@@ -45,6 +45,9 @@ export class Agent {
         this._replacementStarting = false;
         this._rejoinAttempts = 0;
         this._updateLoopStarted = false;
+        this.lastHumanInteractionAt = Date.now();
+        this.lastHumanUser = null;
+        this.idleTpaSent = false;
 
         // Initialize components
         this.actions = new ActionManager(this);
@@ -317,6 +320,7 @@ export class Agent {
             try {
                 if (ignore_messages.some((m) => message.startsWith(m))) return;
 
+                this.recordHumanInteraction(username);
                 const gateOptions = resolveChatGateOptions(this.prompter.profile);
                 const incoming = prepareIncomingChat(message, { inGame, ...gateOptions });
                 if (!incoming.accepted) return;
@@ -418,12 +422,22 @@ export class Agent {
         convoManager.endAllConversations();
     }
 
+    recordHumanInteraction(username) {
+        if (!username || username === 'system' || username === this.name) return;
+        if (convoManager.isOtherAgent(username)) return;
+        this.lastHumanInteractionAt = Date.now();
+        this.idleTpaSent = false;
+        if (this.bot?.players?.[username] && username !== this.bot.username)
+            this.lastHumanUser = username;
+    }
+
     async handleMessage(source, message, max_responses=null) {
         await this.checkTaskDone();
         if (!source || !message) {
             console.warn('Received empty message from', source);
             return false;
         }
+        this.recordHumanInteraction(source);
 
         let used_command = false;
         if (max_responses === null) {
