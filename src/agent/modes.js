@@ -322,22 +322,43 @@ const modes_list = [
     },
     {
         name: 'idle_social_tpa',
-        description: 'When no human has interacted for a while, TPA once to the last interacting online player.',
+        description: 'When idle with no nearby players for 20 minutes, randomly TPA to an online player and follow them if accepted.',
         interrupts: [],
         on: true,
         active: false,
-        interval: 10 * 60 * 1000,
-        accept_wait: 5000,
+        interval: 20 * 60 * 1000,
+        detect_range: 16,
+        accept_wait: 10 * 1000,
+        idle_since: null,
         update: async function (agent) {
-            if (!agent.isIdle()) return;
-            if (agent.idleTpaSent) return;
-            if (!agent.lastHumanUser) return;
-            if (Date.now() - agent.lastHumanInteractionAt < this.interval) return;
-            const bot = agent.bot;
-            const username = agent.lastHumanUser;
-            if (!bot.players?.[username]) return;
+            // "Idle" here means no task/action is running. Any movement/action resets the 20m timer.
+            if (!agent.isIdle()) {
+                this.idle_since = null;
+                return;
+            }
 
-            agent.idleTpaSent = true; // set before execute to avoid 300ms loop spam
+            // If any human player is already nearby, do not trigger social TPA.
+            const nearbyPlayer = world.getNearestEntityWhere(agent.bot, entity =>
+                entity.type === 'player' &&
+                entity.username &&
+                entity.username !== agent.bot.username &&
+                !convoManager.isOtherAgent(entity.username),
+                this.detect_range
+            );
+            if (nearbyPlayer) {
+                this.idle_since = null;
+                return;
+            }
+
+            if (this.idle_since === null) this.idle_since = Date.now();
+            if (Date.now() - this.idle_since < this.interval) return;
+            this.idle_since = Date.now();
+
+            const bot = agent.bot;
+            const candidates = Object.keys(bot.players ?? {})
+                .filter(username => username && username !== bot.username && !convoManager.isOtherAgent(username));
+            if (candidates.length === 0) return;
+            const username = candidates[Math.floor(Math.random() * candidates.length)];
             execute(this, agent, async () => {
                 const before = bot.entity.position.clone();
                 const sent = requestTpaToPlayer(bot, username);
