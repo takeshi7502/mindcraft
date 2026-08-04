@@ -99,10 +99,13 @@ export class Agent {
             serverProxy.login();
             
             // Set skin for profile, requires Fabric Tailor. (https://modrinth.com/mod/fabrictailor)
-            if (this.prompter.profile.skin)
-                initialBot.chat(`/skin set URL ${this.prompter.profile.skin.model} ${this.prompter.profile.skin.path}`);
-            else
-                initialBot.chat(`/skin clear`);
+            // Do not send /skin clear on join: some servers kick for commands issued too soon.
+            if (this.prompter.profile.skin) {
+                setTimeout(() => {
+                    if (initialBot !== this.bot) return;
+                    initialBot.chat(`/skin set URL ${this.prompter.profile.skin.model} ${this.prompter.profile.skin.path}`);
+                }, 5000);
+            }
         });
 		const spawnTimeoutDuration = settings.spawn_timeout;
         const spawnTimeout = setTimeout(() => {
@@ -238,10 +241,12 @@ export class Agent {
             if (bot !== this.bot || this._disconnectHandled) return;
             console.log(`${this.name} logged in for recovery attempt ${this._rejoinAttempts}.`);
             serverProxy.login();
-            if (this.prompter.profile.skin)
-                bot.chat(`/skin set URL ${this.prompter.profile.skin.model} ${this.prompter.profile.skin.path}`);
-            else
-                bot.chat('/skin clear');
+            if (this.prompter.profile.skin) {
+                setTimeout(() => {
+                    if (bot !== this.bot || this._disconnectHandled) return;
+                    bot.chat(`/skin set URL ${this.prompter.profile.skin.model} ${this.prompter.profile.skin.path}`);
+                }, 5000);
+            }
         });
 
         const spawnTimeout = setTimeout(() => {
