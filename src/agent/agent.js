@@ -103,7 +103,9 @@ export class Agent {
             if (this.prompter.profile.skin) {
                 setTimeout(() => {
                     if (initialBot !== this.bot) return;
-                    initialBot.chat(`/skin set URL ${this.prompter.profile.skin.model} ${this.prompter.profile.skin.path}`);
+                    const skinCommand = `/skin url ${this.prompter.profile.skin.path} ${this.prompter.profile.skin.model}`;
+                    console.log(`${this.name} setting skin with: ${skinCommand}`);
+                    initialBot.chat(skinCommand);
                 }, 5000);
             }
         });
@@ -244,7 +246,9 @@ export class Agent {
             if (this.prompter.profile.skin) {
                 setTimeout(() => {
                     if (bot !== this.bot || this._disconnectHandled) return;
-                    bot.chat(`/skin set URL ${this.prompter.profile.skin.model} ${this.prompter.profile.skin.path}`);
+                    const skinCommand = `/skin url ${this.prompter.profile.skin.path} ${this.prompter.profile.skin.model}`;
+                    console.log(`${this.name} setting skin with: ${skinCommand}`);
+                    bot.chat(skinCommand);
                 }, 5000);
             }
         });
