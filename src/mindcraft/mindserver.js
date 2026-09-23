@@ -267,6 +267,54 @@ export function createMindServer(host_public = false, port = 8080) {
 			}
 		});
 
+        // This is deliberately separate from `send-message`: it makes the Minecraft
+        // player speak, without sending a prompt to the agent/LLM.
+        socket.on('bot-chat', (agentName, data, callback) => {
+            const respond = (result) => {
+                if (typeof callback === 'function') callback(result);
+            };
+            const message = typeof data?.message === 'string' ? data.message.trim() : '';
+            const agent = agent_connections[agentName];
+            if (!agent?.in_game || !agent.socket) {
+                respond({ success: false, error: 'Bot is not in game.' });
+                return;
+            }
+            if (!message || message.length > 256) {
+                respond({ success: false, error: 'Chat message must be 1–256 characters.' });
+                return;
+            }
+            // A slash would turn a normal chat packet into a Minecraft command.
+            if (message.startsWith('/')) {
+                respond({ success: false, error: 'Commands are not allowed in bot chat.' });
+                return;
+            }
+            agent.socket.timeout(5000).emit('bot-chat', { message }, (error, result) => {
+                respond(error ? { success: false, error: 'Bot did not respond in time.' } : result);
+            });
+        });
+
+        // Dashboard inventory controls intentionally bypass the LLM. `delete` sends a
+        // tightly validated /clear command while `drop` tosses physical item stacks.
+        socket.on('inventory-action', (agentName, data, callback) => {
+            const respond = (result) => {
+                if (typeof callback === 'function') callback(result);
+            };
+            const action = data?.action;
+            const itemName = typeof data?.itemName === 'string' ? data.itemName.trim() : '';
+            const agent = agent_connections[agentName];
+            if (!agent?.in_game || !agent.socket) {
+                respond({ success: false, error: 'Bot is not in game.' });
+                return;
+            }
+            if (!['delete', 'drop'].includes(action) || !/^[a-z0-9_:-]+$/i.test(itemName)) {
+                respond({ success: false, error: 'Invalid inventory action.' });
+                return;
+            }
+            agent.socket.timeout(10000).emit('inventory-action', { action, itemName }, (error, result) => {
+                respond(error ? { success: false, error: 'Inventory action timed out.' } : result);
+            });
+        });
+
         socket.on('bot-output', (agentName, message) => {
             io.emit('bot-output', agentName, message);
         });

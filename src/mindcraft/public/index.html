@@ -209,6 +209,31 @@
             text-overflow: ellipsis;
             white-space: nowrap;
         }
+        .inv-actions {
+            display: flex;
+            gap: 5px;
+            width: 100%;
+        }
+        .inv-action-btn {
+            flex: 1;
+            border: none;
+            border-radius: 4px;
+            padding: 4px 5px;
+            color: #fff;
+            cursor: pointer;
+            font-size: 0.78em;
+        }
+        .inv-action-btn.drop { background: #4d7c4d; }
+        .inv-action-btn.drop:hover { background: #5b955b; }
+        .inv-action-btn.delete { background: #9e3d3d; }
+        .inv-action-btn.delete:hover { background: #ba4747; }
+        .inv-action-btn:disabled { opacity: 0.5; cursor: wait; }
+        .inventory-status {
+            min-height: 1.2em;
+            margin: 0 0 8px;
+            color: #aaa;
+            font-size: 0.85em;
+        }
         /* Under-icon durability bar (quick glance, no hover) */
         .dura-badge {
             width: 30px;
@@ -297,6 +322,18 @@
             grid-template-columns: auto minmax(100px, 1fr) repeat(5, auto);
             gap: 8px;
             align-items: center;
+        }
+        .bot-chat-row {
+            margin-top: 8px;
+            display: grid;
+            grid-template-columns: auto minmax(100px, 1fr) auto;
+            gap: 8px;
+            align-items: center;
+        }
+        .bot-chat-label {
+            color: #9ed0ff;
+            font-size: 0.9em;
+            white-space: nowrap;
         }
         .msg-input {
             width: calc(100% - 8px);
@@ -909,6 +946,10 @@
                                             ${badge}
                                             <div class="inv-count">${v}</div>
                                             <div class="inv-name">${displayTitle}</div>
+                                            <div class="inv-actions">
+                                                <button class="inv-action-btn drop" title="Throw all ${v} items at the bot's feet" onclick="inventoryAction('${name}', '${k}', 'drop', ${v}, this)">Drop</button>
+                                                <button class="inv-action-btn delete" title="Permanently clear all ${v} items (requires bot OP)" onclick="inventoryAction('${name}', '${k}', 'delete', ${v}, this)">Delete</button>
+                                            </div>
                                         </div>
                                     `;
                                 })
@@ -1098,7 +1139,8 @@
                             <div class="cell" id="items-${agent.name}">inventory slots: -</div>
                             <div class="cell" id="equipped-${agent.name}">equipped: -</div>
                             <div class="agent-inventory" id="inventorySection-${agent.name}" style="${invStyle} grid-column: 1 / -1;">
-                                <h3>Inventory</h3>
+                                <h3>Inventory — Drop ném đồ dưới chân bot; Delete xoá vĩnh viễn (bot cần OP)</h3>
+                                <div class="inventory-status" id="inventoryStatus-${agent.name}" aria-live="polite"></div>
                                 <div class="cell" id="armor-${agent.name}" style="margin-bottom: 8px;">armor: -</div>
                                 <div class="inventory-grid" id="inventory-${agent.name}"></div>
                             </div>
@@ -1106,7 +1148,7 @@
                         </div>
                         <div class="controls-row">
                             <button class="start-btn" id="sendBtn-${agent.name}" disabled onclick="sendMessage('${agent.name}', document.getElementById('messageInput-${agent.name}').value)">Send</button>
-                            <input class="msg-input" type="text" id="messageInput-${agent.name}" placeholder="Enter message..." 
+                            <input class="msg-input" type="text" id="messageInput-${agent.name}" placeholder="Prompt / lệnh cho AI bot..."
                                 oninput="onMsgInputChange('${agent.name}')"
                                 onkeydown="if(event.key === 'Enter') document.getElementById('sendBtn-${agent.name}').click()"
                                 ${!agent.in_game ? 'disabled' : ''}>
@@ -1115,6 +1157,13 @@
                             <button class="neutral-btn" onclick="restartAgent('${agent.name}')" ${!agent.in_game ? 'disabled' : ''}>Restart</button>
                             <button class="neutral-btn" ${agent.in_game ? `onclick=\"disconnectAgent('${agent.name}')\"` : (agent.socket_connected ? 'disabled' : `onclick=\"startAgent('${agent.name}')\"`)}>${agent.in_game ? 'Disconnect' : (agent.socket_connected ? 'Connecting...' : 'Connect')}</button>
                             <button class="stop-btn" onclick="destroyAgent('${agent.name}')">Remove</button>
+                        </div>
+                        <div class="bot-chat-row">
+                            <span class="bot-chat-label">Chat bằng ${agent.name}</span>
+                            <input class="msg-input" type="text" id="botChatInput-${agent.name}" maxlength="256" placeholder="Gửi chat thường trong Minecraft (không chạy lệnh)..."
+                                onkeydown="if(event.key === 'Enter') document.getElementById('botChatBtn-${agent.name}').click()"
+                                ${!agent.in_game ? 'disabled' : ''}>
+                            <button class="start-btn" id="botChatBtn-${agent.name}" onclick="sendBotChat('${agent.name}')" ${!agent.in_game ? 'disabled' : ''}>Chat</button>
                         </div>
                     </div>`;
         }
@@ -1272,6 +1321,42 @@
             }
         }
 
+        function sendBotChat(name) {
+            const input = document.getElementById(`botChatInput-${name}`);
+            const button = document.getElementById(`botChatBtn-${name}`);
+            const message = input?.value?.trim();
+            if (!message) return;
+            if (message.startsWith('/')) {
+                setInventoryStatus(name, 'Chat thường không nhận lệnh bắt đầu bằng /.');
+                return;
+            }
+            if (button) button.disabled = true;
+            socket.emit('bot-chat', name, { message }, (result) => {
+                if (button) button.disabled = false;
+                if (result?.success) {
+                    if (input) input.value = '';
+                    setInventoryStatus(name, 'Đã gửi chat bằng bot.');
+                } else {
+                    setInventoryStatus(name, result?.error || 'Không gửi được chat.');
+                }
+            });
+        }
+
+        function setInventoryStatus(name, message) {
+            const status = document.getElementById(`inventoryStatus-${name}`);
+            if (status) status.textContent = message;
+        }
+
+        function inventoryAction(name, itemName, action, count, button) {
+            if (action === 'delete' && !confirm(`Xóa vĩnh viễn toàn bộ ${count} ${prettyItemName(itemName)} của ${name}?`)) return;
+            if (button) button.disabled = true;
+            setInventoryStatus(name, `${action === 'delete' ? 'Đang xoá' : 'Đang drop'} ${count} ${prettyItemName(itemName)}...`);
+            socket.emit('inventory-action', name, { action, itemName }, (result) => {
+                if (button) button.disabled = false;
+                setInventoryStatus(name, result?.success ? result.message : (result?.error || 'Thao tác kho đồ thất bại.'));
+            });
+        }
+
         function toggleDetails(name) {
             const invSection = document.getElementById(`inventorySection-${name}`);
             if (!invSection) return;
@@ -1281,6 +1366,8 @@
             inventoryOpen[name] = newVisible;
         }
         window.toggleDetails = toggleDetails;
+        window.sendBotChat = sendBotChat;
+        window.inventoryAction = inventoryAction;
     </script>
 </body>
 </html> 

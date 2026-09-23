@@ -69,6 +69,69 @@ class MindServerProxy {
             }
         });
 
+        this.socket.on('bot-chat', (data, callback) => {
+            const message = typeof data?.message === 'string' ? data.message.trim() : '';
+            try {
+                if (!message || message.length > 256 || message.startsWith('/')) {
+                    callback?.({ success: false, error: 'Only normal chat messages are allowed.' });
+                    return;
+                }
+                this.agent.bot.chat(message);
+                callback?.({ success: true, message: 'Chat sent.' });
+            } catch (error) {
+                console.error('Bot chat failed:', error);
+                callback?.({ success: false, error: 'Could not send bot chat.' });
+            }
+        });
+
+        this.socket.on('inventory-action', async (data, callback) => {
+            const action = data?.action;
+            const itemName = typeof data?.itemName === 'string' ? data.itemName.trim() : '';
+            const bot = this.agent?.bot;
+            const total = () => (bot?.inventory?.slots || []).reduce(
+                (sum, item) => sum + (item?.name === itemName ? item.count : 0), 0);
+            try {
+                if (!bot || !['delete', 'drop'].includes(action) || !/^[a-z0-9_:-]+$/i.test(itemName)) {
+                    callback?.({ success: false, error: 'Invalid inventory action.' });
+                    return;
+                }
+                const before = total();
+                if (before === 0) {
+                    callback?.({ success: false, error: `No ${itemName} in inventory.` });
+                    return;
+                }
+
+                if (action === 'delete') {
+                    // Mineflayer cannot delete survival items client-side. This exact,
+                    // generated command is safe from command injection and needs OP.
+                    bot.chat(`/clear @s minecraft:${itemName.replace(/^minecraft:/, '')}`);
+                    await new Promise(resolve => setTimeout(resolve, 750));
+                    const removed = before - total();
+                    if (removed <= 0) {
+                        callback?.({ success: false, error: 'Could not clear item. Give the bot OP for /clear.' });
+                        return;
+                    }
+                    callback?.({ success: true, message: `Deleted ${removed} ${itemName}.` });
+                    return;
+                }
+
+                // Close a chest/crafting window first so each item's inventory slot is
+                // valid, then toss every matching stack at the bot's current position.
+                if (bot.currentWindow && bot.currentWindow !== bot.inventory) bot.closeWindow(bot.currentWindow);
+                let dropped = 0;
+                while (true) {
+                    const item = (bot.inventory.slots || []).find(entry => entry?.name === itemName);
+                    if (!item) break;
+                    dropped += item.count;
+                    await bot.tossStack(item);
+                }
+                callback?.({ success: dropped > 0, message: `Dropped ${dropped} ${itemName} at the bot's feet.` });
+            } catch (error) {
+                console.error('Inventory action failed:', error);
+                callback?.({ success: false, error: 'Could not complete inventory action.' });
+            }
+        });
+
         this.socket.on('get-full-state', (callback) => {
             try {
                 const state = getFullState(this.agent);
