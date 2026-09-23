@@ -9,6 +9,9 @@ bots/**/
 keys.json
 andy.json
 settings.js
+# Local Telegram RCON credentials and runtime state
+telegram-rcon-bot.mjs
+.telegram-rcon-state.json
 services/viaproxy/jars/**
 services/viaproxy/logs/**
 services/viaproxy/plugins/**
