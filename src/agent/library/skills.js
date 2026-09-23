@@ -665,15 +665,6 @@ export async function defendSelf(bot, range=9, preferredEnemy=null) {
         mc.canRetaliateAgainst(preferredEnemy)
         ? preferredEnemy
         : world.getNearestEntityWhere(bot, entity => mc.isHostile(entity), range);
-    if (preferredEnemy && enemy) {
-        const distance = bot.entity.position.distanceTo(enemy.position);
-        const verticalDifference = Math.abs(bot.entity.position.y - enemy.position.y);
-        const hasRanged = Boolean(getRangedWeapon(bot));
-        if (distance > 48 || verticalDifference > 18 || (!hasRanged && !await world.isClearPath(bot, enemy))) {
-            log(bot, `Stopping retaliation: attacker is no longer safely reachable.`);
-            return false;
-        }
-    }
     while (enemy) {
         const meleeWeapon = await equipHighestAttack(bot);
         if (!meleeWeapon) {
@@ -707,7 +698,11 @@ export async function defendSelf(bot, range=9, preferredEnemy=null) {
         bot.pvp.attack(enemy);
         attacked = true;
         if (preferredEnemy === enemy) {
-            const pursuitDeadline = Date.now() + 10000;
+            // A confirmed attacker may be a skeleton/trident thrower well outside
+            // the normal nearby-enemy range. Chase it while it remains tracked;
+            // the time limit avoids an endless pathfinding attempt, not a distance
+            // cutoff that would ignore valid ranged attacks.
+            const pursuitDeadline = Date.now() + 30000;
             const preferredId = enemy.id;
             let switchedToRanged = false;
             while (Date.now() < pursuitDeadline && !bot.interrupt_code &&
@@ -726,7 +721,7 @@ export async function defendSelf(bot, range=9, preferredEnemy=null) {
             }
             if (!switchedToRanged && Date.now() >= pursuitDeadline && enemy.isValid !== false) {
                 bot.pvp.stop();
-                log(bot, `Giving up retaliation: could not reach ${enemy.username ?? enemy.name} within 10 seconds.`);
+                log(bot, `Giving up retaliation: could not reach ${enemy.username ?? enemy.name} within 30 seconds.`);
                 return attacked;
             }
         } else {
@@ -747,6 +742,84 @@ export async function defendSelf(bot, range=9, preferredEnemy=null) {
     return attacked;
 }
 
+function samePosition(left, right) {
+    return left?.x === right?.x && left?.y === right?.y && left?.z === right?.z;
+}
+
+function bambooRootPredicate(bot, exclude, skippedRoots) {
+    return block => {
+        if (block.name !== 'bamboo' && block.name !== 'bamboo_sapling') return false;
+        if (skippedRoots.has(`${block.position.x},${block.position.y},${block.position.z}`)) return false;
+        if (exclude?.some(position => samePosition(block.position, position))) return false;
+
+        // A bamboo stem above another bamboo block is only part of the stalk.
+        // Digging its root is reachable from the ground and drops the entire stalk.
+        if (block.name === 'bamboo') {
+            const below = bot.blockAt(block.position.offset(0, -1, 0));
+            return below?.name !== 'bamboo' && below?.name !== 'bamboo_sapling';
+        }
+        return true; // bamboo_sapling itself is always a harvestable root.
+    };
+}
+
+async function collectBamboo(bot, num, exclude = null) {
+    const startCount = world.getInventoryCounts(bot).bamboo ?? 0;
+    const targetCount = startCount + num;
+    const skippedRoots = new Set();
+
+    while ((world.getInventoryCounts(bot).bamboo ?? 0) < targetCount && !bot.interrupt_code) {
+        // Try several roots: the closest visible stalk can be behind a wall or
+        // on an unreachable ledge, while another nearby stalk is reachable.
+        const roots = world.getNearestBlocksWhere(
+            bot,
+            bambooRootPredicate(bot, exclude, skippedRoots),
+            64,
+            16,
+        );
+        if (roots.length === 0) {
+            log(bot, skippedRoots.size > 0
+                ? 'No reachable bamboo roots nearby.'
+                : 'No bamboo roots nearby to collect.');
+            break;
+        }
+
+        let harvested = false;
+        for (const root of roots) {
+            const key = `${root.position.x},${root.position.y},${root.position.z}`;
+            const reached = await goToPosition(bot, root.position.x, root.position.y, root.position.z, 2);
+            if (!reached) {
+                skippedRoots.add(key);
+                continue;
+            }
+            const current = bot.blockAt(root.position);
+            if (!current || (current.name !== 'bamboo' && current.name !== 'bamboo_sapling')) {
+                skippedRoots.add(key);
+                continue;
+            }
+            await bot.tool.equipForBlock(current);
+            const itemId = bot.heldItem ? bot.heldItem.type : null;
+            if (!current.canHarvest(itemId)) {
+                skippedRoots.add(key);
+                continue;
+            }
+            if (await safeDig(bot, current)) {
+                await pickupNearbyItems(bot, 12, 3000);
+                harvested = true;
+                break;
+            }
+            skippedRoots.add(key);
+        }
+        if (!harvested) {
+            log(bot, 'Found bamboo, but could not reach a bamboo root to harvest it.');
+            break;
+        }
+    }
+
+    const collected = Math.max(0, (world.getInventoryCounts(bot).bamboo ?? 0) - startCount);
+    log(bot, `Collected ${collected}/${num} bamboo.`);
+    return collected >= num;
+}
+
 
 
 export async function collectBlock(bot, blockType, num=1, exclude=null) {
@@ -764,6 +837,7 @@ export async function collectBlock(bot, blockType, num=1, exclude=null) {
         log(bot, `Invalid number of blocks to collect: ${num}.`);
         return false;
     }
+    if (blockType === 'bamboo') return collectBamboo(bot, num, exclude);
     let blocktypes = [blockType];
     const oreAliases = {
         coal: { blocks: ['coal_ore', 'deepslate_coal_ore'], items: ['coal'] },
@@ -792,6 +866,10 @@ export async function collectBlock(bot, blockType, num=1, exclude=null) {
         blocktypes.push('grass_block');
     if (blockType === 'cobblestone')
         blocktypes.push('stone');
+    // A newly planted or short bamboo stalk can still be `bamboo_sapling`.
+    // It drops bamboo when broken and must be gathered exactly like bamboo.
+    if (blockType === 'bamboo')
+        blocktypes.push('bamboo_sapling');
     const isLiquid = blockType === 'lava' || blockType === 'water';
     const countCollectedItems = () => {
         const counts = world.getInventoryCounts(bot);
@@ -827,7 +905,9 @@ export async function collectBlock(bot, blockType, num=1, exclude=null) {
                 // collect only source blocks
                 return block.metadata === 0;
             }
-            
+            // Bamboo plants are harmless to break even beside water; the generic
+            // fluid-safety check is for solid blocks and used to hide them.
+            if (block.name === 'bamboo' || block.name === 'bamboo_sapling') return true;
             return movements.safeToBreak(block) || unsafeBlocks.includes(block.name);
         }, 64, 1);
 
@@ -858,11 +938,14 @@ export async function collectBlock(bot, blockType, num=1, exclude=null) {
             if (isLiquid) {
                 success = await useToolOnBlock(bot, 'bucket', block);
             }
-            else if (mc.mustCollectManually(blockType)) {
-                await goToPosition(bot, block.position.x, block.position.y, block.position.z, 2);
-                await safeDig(bot, block);
-                await pickupNearbyItems(bot);
-                success = true;
+            else if (mc.mustCollectManually(block.name)) {
+                const reached = await goToPosition(bot, block.position.x, block.position.y, block.position.z, 2);
+                if (!reached) {
+                    log(bot, `Could not reach ${blockType} to harvest it.`);
+                } else {
+                    success = await safeDig(bot, block);
+                    if (success) await pickupNearbyItems(bot, 12, 3000);
+                }
             }
             else {
                 await withSafeDigTime(bot, () => bot.collectBlock.collect(block));
@@ -1652,6 +1735,7 @@ export async function goToPosition(bot, x, y, z, min_distance=2) {
 
 export async function mineNearestBlock(bot, blockType, range=64) {
     /** Find, approach, and break the nearest matching block. */
+    if (blockType === 'bamboo') return collectBamboo(bot, 1);
     const aliases = [blockType];
     const oreAliases = {
         coal: ['coal_ore', 'deepslate_coal_ore'],
@@ -1669,6 +1753,7 @@ export async function mineNearestBlock(bot, blockType, range=64) {
     };
     if (oreAliases[blockType]) aliases.push(...oreAliases[blockType]);
     if (blockType.endsWith('ore') && !blockType.startsWith('deepslate_') && !blockType.startsWith('nether_')) aliases.push(`deepslate_${blockType}`);
+    if (blockType === 'bamboo') aliases.push('bamboo_sapling');
 
     const pausedModes = ['unstuck', 'item_collecting', 'inventory_cleanup', 'torch_placing', 'elbow_room', 'cowardice', 'self_defense'];
     for (const mode of pausedModes) {
@@ -1722,7 +1807,10 @@ export async function goToNearestBlock(bot, blockType,  min_distance=2, range=64
         block = blocks[0];
     }
     else {
-        block = world.getNearestBlock(bot, blockType, range);
+        const searchTypes = blockType === 'bamboo'
+            ? ['bamboo', 'bamboo_sapling']
+            : blockType;
+        block = world.getNearestBlock(bot, searchTypes, range);
     }
     if (!block) {
         log(bot, `Could not find any ${blockType} in ${range} blocks.`);

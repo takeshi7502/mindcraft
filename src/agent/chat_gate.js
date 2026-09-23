@@ -10,8 +10,7 @@ function escapeRegExp(value) {
 function invocationPattern(name) {
     if (!name) return null;
     return new RegExp(
-        `^\\s*@?\\s*(?<name>${escapeRegExp(name)})(?![\\p{L}\\p{N}_])` +
-        String.raw`(?=$|[\s,.:;!?/()-])`,
+        String.raw`(?<![\p{L}\p{N}_])@?(?<name>${escapeRegExp(name)})(?![\p{L}\p{N}_])`,
         'iu',
     );
 }
@@ -52,11 +51,20 @@ export function prepareIncomingChat(message, {
         return { accepted: false, invoked: false, message: '' };
     }
 
-    const request = stripInvocationDelimiter(message.slice(match[0].length));
+    const beforeMention = message.slice(0, match.index);
+    // Keep a natural sentence intact when the bot is mentioned in its middle or
+    // at its end. For a leading invocation, remove the name as before so the
+    // model receives the actual request rather than its own name.
+    const request = beforeMention.trim().length > 0
+        ? message.trim()
+        : stripInvocationDelimiter(message.slice(match[0].length));
+    // A player may call only the bot's name ("waku" / "@waku"). Treat that
+    // as an invocation too, so the bot can answer instead of silently ignoring it.
+    const responseMessage = request || message.trim();
     return {
-        accepted: request.length > 0,
+        accepted: responseMessage.length > 0,
         invoked: true,
         matchedName: match.groups?.name ?? null,
-        message: request,
+        message: responseMessage,
     };
 }

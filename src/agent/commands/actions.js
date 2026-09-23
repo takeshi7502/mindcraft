@@ -712,7 +712,7 @@ export const actionsList = [
     },
     {
         name: '!collectBlocks',
-        description: 'Collect the nearest blocks/items of a given type. Use for mining/gathering requests with a requested quantity. If the user gives no quantity, use 1. If the user asks for a stack, use 64.',
+        description: 'Collect the nearest blocks/items of a given type. Use for mining/gathering requests with a requested quantity. Use `bamboo` for bamboo/tre; it is harvested by breaking the base of each stalk. If the user gives no quantity, use 1. If the user asks for a stack, use 64.',
         params: {
             'type': { type: 'BlockName', description: 'The block type to collect.' },
             'num': { type: 'int', description: 'The number of blocks to collect.', domain: [1, Number.MAX_SAFE_INTEGER] }

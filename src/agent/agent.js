@@ -669,6 +669,8 @@ export class Agent {
         });
         bot.on('entityHurt', (entity, source) => {
             if (entity !== bot.entity || !source) return;
+            // Retaliation is committed only after this server damage source is
+            // paired with an actual health decrease in the short window above.
             commitDamage(recordHurtSource(bot.damageCorrelator, source));
         });
         // Logging callbacks
